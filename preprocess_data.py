@@ -1,125 +1,81 @@
+# saves the openwebtext dataset to a binary file for training. following was helpful:
+# https://github.com/HazyResearch/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
+
 import os
-import tarfile
-import lzma
-import shutil
-from multiprocessing import Pool, cpu_count
-from functools import partial
 from tqdm import tqdm
-import argparse
+import numpy as np
+import tiktoken
+from datasets import load_dataset # huggingface datasets
 
-def extract_single_tar(tar_path, extract_dir):
-    """
-    Extracts a single .tar file into a unique subdirectory within extract_dir with a security filter.
-    """
-    # Derive a unique subdirectory name from the tar file name
-    tar_filename = os.path.basename(tar_path)
-    tar_name_without_ext = os.path.splitext(tar_filename)[0]
-    target_dir = os.path.join(extract_dir, tar_name_without_ext)
-    os.makedirs(target_dir, exist_ok=True)
+# number of workers in .map() call
+# good number to use is ~order number of cpu cores // 2
+num_proc = 8
 
-    def safe_extract_filter(member, path):
-        """
-        Filter function to ensure safe extraction of tar files.
-        Prevents files from being extracted outside the target directory.
-        """
-        # Prevent absolute paths and directory traversal
-        if os.path.isabs(member.name) or '..' in member.name.split(os.sep):
-            return None
-        # You can add additional security checks here if needed
-        return member
+# number of workers in load_dataset() call
+# best number might be different from num_proc above as it also depends on NW speed.
+# it is better than 1 usually though
+num_proc_load_dataset = num_proc
 
-    try:
-        with tarfile.open(tar_path, 'r') as tar:
-            tar.extractall(path=target_dir, filter=safe_extract_filter)
-        return True, tar_path
-    except Exception as e:
-        return False, tar_path, str(e)
-
-def extract_tar_files(tar_dir, extract_dir):
-    """
-    Extracts all .tar files from tar_dir into unique subdirectories within extract_dir using multiprocessing.
-    """
-    os.makedirs(extract_dir, exist_ok=True)
-    tar_files = [os.path.join(tar_dir, f) for f in os.listdir(tar_dir) if f.endswith('.tar')]
-
-    print(f"Found {len(tar_files)} .tar files to extract.")
-
-    if not tar_files:
-        print("No .tar files found. Exiting extraction phase.")
-        return
-
-    # Use multiprocessing Pool to extract tar files in parallel
-    with Pool(processes=cpu_count()) as pool:
-        func = partial(extract_single_tar, extract_dir=extract_dir)
-        results = list(tqdm(pool.imap(func, tar_files), total=len(tar_files), desc="Extracting .tar files"))
-
-    # Handle extraction results
-    failed = [res for res in results if not res[0]]
-    if failed:
-        print(f"Failed to extract {len(failed)} .tar files:")
-        for fail in failed:
-            print(f" - {fail[1]}: {fail[2]}")
-    else:
-        print("All .tar files extracted successfully.")
-
-def decompress_single_xz(xz_path, text_dir):
-    """
-    Decompresses a single .xz file and saves the text file to text_dir with a .txt extension.
-    """
-    try:
-        filename = os.path.basename(xz_path)
-        text_filename = filename.replace('.xz', '.txt')  # Append .txt extension
-        text_path = os.path.join(text_dir, text_filename)
-
-        with lzma.open(xz_path, 'rt') as f_in, open(text_path, 'w', encoding='utf-8') as f_out:
-            shutil.copyfileobj(f_in, f_out)
-
-        return True, xz_path
-    except Exception as e:
-        return False, xz_path, str(e)
-
-def decompress_xz_files(extract_dir, text_dir):
-    """
-    Decompresses all .xz files in extract_dir and saves the text files to text_dir using multiprocessing.
-    """
-    os.makedirs(text_dir, exist_ok=True)
-    xz_files = []
-    for root, dirs, files in os.walk(extract_dir):
-        for file in files:
-            if file.endswith('.xz'):
-                xz_files.append(os.path.join(root, file))
-
-    print(f"Found {len(xz_files)} .xz files to decompress.")
-
-    if not xz_files:
-        print("No .xz files found. Exiting decompression phase.")
-        return
-
-    # Use multiprocessing Pool to decompress xz files in parallel
-    with Pool(processes=cpu_count()) as pool:
-        func = partial(decompress_single_xz, text_dir=text_dir)
-        results = list(tqdm(pool.imap(func, xz_files), total=len(xz_files), desc="Decompressing .xz files"))
-
-    # Handle decompression results
-    failed = [res for res in results if not res[0]]
-    if failed:
-        print(f"Failed to decompress {len(failed)} .xz files:")
-        for fail in failed:
-            print(f" - {fail[1]}: {fail[2]}")
-    else:
-        print("All .xz files decompressed successfully.")
-
-def main():
-    parser = argparse.ArgumentParser(description='Preprocess data by extracting and decompressing .tar and .xz files.')
-    parser.add_argument('--tar_dir', type=str, required=True, help='Directory containing .tar files.')
-    parser.add_argument('--extract_dir', type=str, default='extracted/', help='Directory to extract .tar files.')
-    parser.add_argument('--text_dir', type=str, default='text_data/', help='Directory to store decompressed text files.')
-    args = parser.parse_args()
-
-    extract_tar_files(args.tar_dir, args.extract_dir)
-    decompress_xz_files(args.extract_dir, args.text_dir)
-
-    print("Preprocessing completed successfully.")
+enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    main()
+    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
+    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset, trust_remote_code=True)
+
+    # owt by default only contains the 'train' split, so create a test split
+    split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
+    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
+
+    # this results in:
+    # >>> split_dataset
+    # DatasetDict({
+    #     train: Dataset({
+    #         features: ['text'],
+    #         num_rows: 8009762
+    #     })
+    #     val: Dataset({
+    #         features: ['text'],
+    #         num_rows: 4007
+    #     })
+    # })
+
+    # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
+    def process(example):
+        ids = enc.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
+        ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
+        # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
+        out = {'ids': ids, 'len': len(ids)}
+        return out
+
+    # tokenize the dataset
+    tokenized = split_dataset.map(
+        process,
+        remove_columns=['text'],
+        desc="tokenizing the splits",
+        num_proc=num_proc,
+    )
+
+    # concatenate all the ids in each dataset into one large file we can use for training
+    for split, dset in tokenized.items():
+        arr_len = np.sum(dset['len'], dtype=np.uint64)
+        filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
+        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
+        arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
+        total_batches = 1024
+
+        idx = 0
+        for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
+            # Batch together samples for faster write
+            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+            arr_batch = np.concatenate(batch['ids'])
+            # Write into mmap
+            arr[idx : idx + len(arr_batch)] = arr_batch
+            idx += len(arr_batch)
+        arr.flush()
+
+    # train.bin is ~17GB, val.bin ~8.5MB
+    # train has ~9B tokens (9,035,582,198)
+    # val has ~4M tokens (4,434,897)
+
+    # to read the bin files later, e.g. with numpy:
+    # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
