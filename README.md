@@ -1,10 +1,9 @@
-# Optimizing GPT-2 Training and Inference: Hybrid Parallelism with Megatron-LM, FlashAttention, and Quantization
+# Optimizing GPT-2 Training and Inference: Hybrid Parallelism with FlashAttention 
 
 ## **Overview**
 This project aims to enhance the efficiency of GPT-2's training and inference processes by leveraging cutting-edge techniques such as:
 - **Hybrid Parallelism**: Utilizing Megatron-LM to implement both data and model parallelism for efficient multi-GPU training.
 - **FlashAttention**: Replacing the standard attention mechanism with a memory-efficient variant to optimize training on long-context sequences.
-- **Quantization-Aware Training (QAT)**: Reducing precision during training to accelerate inference while maintaining accuracy.
 
 By integrating these techniques, we aim to achieve:
 - A **30–50% reduction in training time**.
@@ -22,9 +21,6 @@ By integrating these techniques, we aim to achieve:
    - Reduces memory overhead in attention mechanisms for long-sequence training.
    - Accelerates training while enabling longer context handling.
 
-3. **Quantization**:
-   - Implements QAT to optimize inference performance without significant accuracy trade-offs.
-   - Custom CUDA kernels are utilized for faster execution on NVIDIA GPUs.
 
 ---
 
