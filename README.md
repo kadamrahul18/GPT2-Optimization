@@ -80,16 +80,16 @@ After training, the script automatically generates text. Modify the prompt and m
 ### **Charts**
 
 1. **Training Throughput per Epoch:**  
-   ![Training Throughput](vdocs/Training throughput per epoch.png)
+   ![Training Throughput](vdocs/Training_throughput_per_epoch.png)
 
 2. **Validation Loss per Epoch:**  
-   ![Validation Loss](docs/Validation loss per epoch.png)
+   ![Validation Loss](docs/Validation_loss_per_epoch.png)
 
 3. **Training Time per Epoch:**  
-   ![Training Time](docs/Training time per epoch.png)
+   ![Training Time](docs/Training_time_per_epoch.png)
 
 4. **Peak Memory Usage:**  
-   ![Peak Memory Usage](docs/Peak memory usage.png)
+   ![Peak Memory Usage](docs/Peak_memory_usage.png)
 
 ### **Observations**
 - **Training Time:** Significant reduction (44%) with DeepSpeed and FlashAttention.  
