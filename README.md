@@ -56,8 +56,11 @@ The goal of this project is to reduce training time, memory usage, and inference
 ### **Data Preparation**
 Run the `preprocess_data.py` script to download and preprocess the OpenWebText dataset:
 `python preprocess_data.py` This will generate train.bin (~17GB) and val.bin (~8.5MB) in the project directory for training and validation.
+
 `python gpt2.py --run_type baseline --train_data_path train.bin --val_data_path val.bin --checkpoint_path checkpoint --epochs 1 --train_micro_batch_size_per_gpu 4 --gradient_accumulation_steps 4` Run this for baseline Training
+
 `deepspeed gpt2.py --run_type optimized --train_data_path train.bin --val_data_path val.bin --checkpoint_path checkpoint --epochs 1 --deepspeed_config deepspeed_config.json --pipeline_stages 2 --train_micro_batch_size_per_gpu 4 --gradient_accumulation_steps 4` Run this for Optimized Training
+
 After training, the script automatically generates text. Modify the prompt and max_length parameters in gpt2.py to customize text generation.
 
 
