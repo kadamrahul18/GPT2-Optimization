@@ -80,7 +80,7 @@ After training, the script automatically generates text. Modify the prompt and m
 ### **Charts**
 
 1. **Training Throughput per Epoch:**  
-   ![Training Throughput](vdocs/Training_throughput_per_epoch.png)
+   ![Training Throughput](docs/Training_throughput_per_epoch.png)
 
 2. **Validation Loss per Epoch:**  
    ![Validation Loss](docs/Validation_loss_per_epoch.png)
