@@ -313,7 +313,7 @@ class GPT2Trainer:
             "max_memory_usage": [],
             "seq_length_feasible": [args.seq_length],  # Store as a list
             "gpus_tested": [torch.cuda.device_count() if torch.cuda.is_available() else 0],
-            "tokens_per_sec": []
+            "train_throughput": []
         }
 
         self.optimized_metrics = copy.deepcopy(self.baseline_metrics)
@@ -356,182 +356,225 @@ class GPT2Trainer:
         return metrics
 
     def train(self):
-        # Determine global rank for distributed scenarios
-        import torch.distributed as dist
-
         if dist.is_available() and dist.is_initialized():
-            global_rank = dist.get_rank()
             # Print device at the beginning of the train() method
-            print(f"[Rank {global_rank}]: Starting train() method, assigned device: cuda:{torch.cuda.current_device()}")
+            print(f"[Rank {self.global_rank}]: Starting train() method, assigned device: cuda:{torch.cuda.current_device()}")
         else:
-            global_rank = 0
             print(f"Starting train() method, using device: {device}")
 
         profile_path = os.path.join(self.args.checkpoint_path, f"{self.args.run_type}_profiler_logs")
+        # Ensure the directory exists
+        os.makedirs(profile_path, exist_ok=True)
 
         # Start the profiler
-        with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=torch.profiler.schedule(
-                wait=1, warmup=1, active=3, repeat=1
-            ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_path),
-            record_shapes=True,
-            with_stack=True,
-            profile_memory=True
-        ) as prof:
+        if self.global_rank == 0:
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(
+                    wait=1, warmup=1, active=3, repeat=1
+                ),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_path),
+                record_shapes=False,
+                with_stack=False,
+                profile_memory=True,
+                with_flops=False
+            ) as prof:
 
-            # Store the start time of training
-            self.train_start_time = time.time()
+                # Store the start time of training
+                self.train_start_time = time.time()
 
-            for epoch in range(self.start_epoch, self.args.epochs):
-                print(f"[Rank {global_rank}]: Starting Epoch {epoch + 1}/{self.args.epochs}")
-                self.epoch_start_time = time.time()
-                if self.args.run_type == 'baseline':
-                    self.model.train()
-                else:
-                    self.model_engine.train()
-                epoch_loss = 0.0
-                progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.args.epochs}", disable=(global_rank != 0))
-
-                for step, batch in enumerate(progress_bar):
-                    print(f"[Rank {global_rank}]: Starting Step {step} of Epoch {epoch + 1}")
-                    input_ids, targets = batch
+                for epoch in range(self.start_epoch, self.args.epochs):
+                    print(f"[Rank {self.global_rank}]: Starting Epoch {epoch + 1}/{self.args.epochs}")
+                    self.epoch_start_time = time.time()
                     if self.args.run_type == 'baseline':
-                        input_ids = input_ids.to(device)
-                        targets = targets.to(device)
-                        inputs = (input_ids, None)
+                        self.model.train()
                     else:
-                        # For DeepSpeed, we assume one GPU per rank
-                        local_device = torch.device(f"cuda:{dist.get_rank()}") if dist.is_initialized() else device
-                        input_ids = input_ids.to(local_device)
-                        targets = targets.to(local_device)
-                        inputs = (input_ids, None)
+                        self.model_engine.train()
+                    epoch_loss = 0.0
+                    progress_bar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.args.epochs}", disable=(self.global_rank != 0))
+                    total_train_loss = 0
+                    num_tokens_processed = 0
 
-                    self.optimizer.zero_grad()
-                    print(f"[Rank {global_rank}]: Zeroed gradients")
-
-                    try:
+                    for step, batch in enumerate(progress_bar):
+                        print(f"[Rank {self.global_rank}]: Starting Step {step} of Epoch {epoch + 1}")
+                        input_ids, targets = batch
                         if self.args.run_type == 'baseline':
-                            # Pass the tuple as *inputs
-                            outputs = self.model(*inputs)
+                            input_ids = input_ids.to(device)
+                            targets = targets.to(device)
+                            inputs = (input_ids, None)
                         else:
-                            outputs = self.model_engine(*inputs)
-                        print(f"[Rank {global_rank}]: Completed forward pass")
-                    except Exception as e:
-                        print(f"[Rank {global_rank}]: Exception during forward pass: {e}")
-                        raise e
+                            # For DeepSpeed, we assume one GPU per rank
+                            local_device = torch.device(f"cuda:{dist.get_rank()}") if dist.is_initialized() else device
+                            input_ids = input_ids.to(local_device)
+                            targets = targets.to(local_device)
+                            inputs = (input_ids, None)
 
-                    try:
-                        outputs = outputs.contiguous()
-                        loss = F.cross_entropy(
-                            outputs.view(-1, self.args.vocab_size), targets.view(-1)
-                        )
-                        print(f"[Rank {global_rank}]: Computed loss: {loss.item():.4f}")
-                    except Exception as e:
-                        print(f"[Rank {global_rank}]: Exception during loss computation: {e}")
-                        raise e
+                        self.optimizer.zero_grad()
+                        print(f"[Rank {self.global_rank}]: Zeroed gradients")
 
-                    # Reset peak memory stats after the first forward pass of the first epoch
-                    if step == 0 and epoch == 0:
-                        if self.args.run_type == 'baseline':
-                            torch.cuda.reset_peak_memory_stats(device)
-                            print(f"[Rank {global_rank}]: Reset peak memory stats for device {device}")
-                        else:
-                            # On optimized runs, we still reset on global_rank=0 GPU
-                            if global_rank == 0:
-                                torch.cuda.reset_peak_memory_stats(device)
-                                print(f"[Rank {global_rank}]: Reset peak memory stats for device {device}")
-
-                    try:
-                        if self.args.run_type == 'baseline':
-                            loss.backward()
-                            self.optimizer.step()
-                            print(f"[Rank {global_rank}]: Completed backward pass and optimizer step")
-                        else:
-                            self.model_engine.backward(loss)
-                            self.model_engine.step()
-                            print(f"[Rank {global_rank}]: Completed backward pass and optimizer step via DeepSpeed")
-                    except Exception as e:
-                        print(f"[Rank {global_rank}]: Exception during backward or optimizer step: {e}")
-                        raise e
-
-                    epoch_loss += loss.item()
-                    progress_bar.set_postfix(loss=loss.item())
-
-                    prof.step()
-
-                    if step % self.log_interval == 0:
-                        # Check memory stats only on global rank 0 to avoid clutter
-                        if global_rank == 0:
-                            memory_stats = torch.cuda.memory_stats(device)
-                            if 'peak_bytes_allocated' in memory_stats:
-                                peak_memory = memory_stats["peak_bytes_allocated"] / (1024 ** 2)  # Convert to MB
+                        try:
+                            if self.args.run_type == 'baseline':
+                                # Pass the tuple as *inputs
+                                outputs = self.model(*inputs)
                             else:
-                                peak_memory = 0.0
-                            print(f"[Rank {global_rank}]: Step {step}, Training Loss: {loss.item():.4f}, Peak Memory: {peak_memory:.2f}MB")
+                                outputs = self.model_engine(*inputs)
+                            print(f"[Rank {self.global_rank}]: Completed forward pass")
+                        except Exception as e:
+                            print(f"[Rank {self.global_rank}]: Exception during forward pass: {e}")
+                            raise e
 
-                self.epoch_end_time = time.time()
-                self.epoch_time = self.epoch_end_time - self.epoch_start_time
-                avg_loss = epoch_loss / len(self.train_dataloader)
-                print(f"[Rank {global_rank}]: Epoch {epoch+1}/{self.args.epochs}, Average Training Loss: {avg_loss:.4f}, Epoch Time: {self.epoch_time:.2f} seconds")
+                        try:
+                            outputs = outputs.contiguous()
+                            loss = F.cross_entropy(
+                                outputs.view(-1, self.args.vocab_size), targets.view(-1)
+                            )
+                            print(f"[Rank {self.global_rank}]: Computed loss: {loss.item():.4f}")
+                        except Exception as e:
+                            print(f"[Rank {self.global_rank}]: Exception during loss computation: {e}")
+                            raise e
 
-                # Adding print statements before and after validation
-                print(f"[Rank {global_rank}]: Starting validation after Epoch {epoch + 1}")
-                self.validate()
-                print(f"[Rank {global_rank}]: Completed validation after Epoch {epoch + 1}")
+                        # Reset peak memory stats after the first forward pass of the first epoch
+                        if step == 0 and epoch == 0:
+                            if self.args.run_type == 'baseline':
+                                torch.cuda.reset_peak_memory_stats(device)
+                                print(f"[Rank {self.global_rank}]: Reset peak memory stats for device {device}")
+                            else:
+                                # On optimized runs, we still reset on global_rank=0 GPU
+                                if self.global_rank == 0:
+                                    torch.cuda.reset_peak_memory_stats(device)
+                                    print(f"[Rank {self.global_rank}]: Reset peak memory stats for device {device}")
 
-                # Adding print statements before and after checkpoint saving
-                print(f"[Rank {global_rank}]: Starting checkpoint saving after Epoch {epoch + 1}")
+                        try:
+                            if self.args.run_type == 'baseline':
+                                loss.backward()
+                                self.optimizer.step()
+                                print(f"[Rank {self.global_rank}]: Completed backward pass and optimizer step")
+                            else:
+                                self.model_engine.backward(loss)
+                                self.model_engine.step()
+                                print(f"[Rank {self.global_rank}]: Completed backward pass and optimizer step via DeepSpeed")
+                        except Exception as e:
+                            print(f"[Rank {self.global_rank}]: Exception during backward or optimizer step: {e}")
+                            raise e
+
+                        batch_loss = loss.item()
+                        epoch_loss += batch_loss
+                        total_train_loss += batch_loss
+
+                        # Calculate the number of tokens processed in this step
+                        num_tokens_processed += input_ids.numel()
+
+                        progress_bar.set_postfix(loss=batch_loss)
+
+                        prof.step()
+
+                        if step % self.log_interval == 0:
+                            # Check memory stats only on global rank 0 to avoid clutter
+                            if self.global_rank == 0:
+                                memory_stats = torch.cuda.memory_stats(device)
+                                # Use a more robust way to get peak memory, handling cases where the key might not exist
+                                if "max_memory_allocated" in memory_stats:
+                                    peak_memory = memory_stats["max_memory_allocated"] / (1024 ** 2)  # Convert to MB
+                                elif "allocated_bytes.all.peak" in memory_stats:
+                                    peak_memory = memory_stats["allocated_bytes.all.peak"] / (1024 ** 2)  # Convert to MB
+                                else:
+                                    peak_memory = 0.0 # Default to 0 if we can't determine the peak
+                                print(f"[Rank {self.global_rank}]: Step {step}, Training Loss: {loss.item():.4f}, Peak Memory: {peak_memory:.2f}MB")
+
+                    self.epoch_end_time = time.time()
+                    self.epoch_time = self.epoch_end_time - self.epoch_start_time
+
+                    # Calculate training throughput for this epoch
+                    train_throughput = num_tokens_processed / self.epoch_time
+
+                    # Record train_time_per_epoch, train_loss_per_epoch, and train_throughput
+                    if self.args.run_type == 'baseline':
+                        self.baseline_metrics["train_time_per_epoch"].append(self.epoch_time)
+                        self.baseline_metrics["train_loss_per_epoch"].append(total_train_loss / len(self.train_dataloader))
+                        self.baseline_metrics["train_throughput"].append(train_throughput)
+                    else:
+                        self.optimized_metrics["train_time_per_epoch"].append(self.epoch_time)
+                        self.optimized_metrics["train_loss_per_epoch"].append(total_train_loss / len(self.train_dataloader))
+                        self.optimized_metrics["train_throughput"].append(train_throughput)
+
+                    avg_loss = epoch_loss / len(self.train_dataloader)
+                    print(f"[Rank {self.global_rank}]: Epoch {epoch+1}/{self.args.epochs}, Average Training Loss: {avg_loss:.4f}, Epoch Time: {self.epoch_time:.2f} seconds")
+
+                    # Adding print statements before and after validation
+                    print(f"[Rank {self.global_rank}]: Starting validation after Epoch {epoch + 1}")
+                    self.validate()
+                    print(f"[Rank {self.global_rank}]: Completed validation after Epoch {epoch + 1}")
+
+                    # Adding print statements before and after checkpoint saving
+                    print(f"[Rank {self.global_rank}]: Starting checkpoint saving after Epoch {epoch + 1}")
+                    if self.args.run_type == 'baseline':
+                        if self.global_rank == 0:
+                            checkpoint = {
+                                'epoch': epoch + 1,
+                                'model_state_dict': self.model.state_dict(),
+                                'optimizer_state_dict': self.optimizer.state_dict(),
+                            }
+                            checkpoint_path = os.path.join(self.args.checkpoint_path, f"baseline_epoch-{epoch+1}.pt")
+                            torch.save(checkpoint, checkpoint_path)
+                            print(f"[Rank {self.global_rank}]: Baseline checkpoint saved at epoch {epoch+1} to {checkpoint_path}")
+                    elif self.args.run_type == 'optimized':
+
+                        checkpoint = self.model_engine.save_checkpoint(self.args.checkpoint_path, tag=f"epoch-{epoch+1}")
+                        print(f"[Rank {self.global_rank}]: Optimized checkpoint saved at epoch {epoch+1} to {checkpoint}")
+                    print(f"[Rank {self.global_rank}]: Completed checkpoint saving after Epoch {epoch + 1}")
+
+                    # Adding barrier to ensure all ranks have completed the epoch before proceeding
+                    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                        print(f"[Rank {self.global_rank}]: Waiting at barrier after Epoch {epoch + 1}")
+                        dist.barrier()
+                        print(f"[Rank {self.global_rank}]: Passed barrier after Epoch {epoch + 1}")
+
+                    # Continue to next epoch
+                    print(f"[Rank {self.global_rank}]: Moving to the next epoch")
+
+                # Store the end time of training
+                self.train_end_time = time.time()
+                self.total_training_time = self.train_end_time - self.train_start_time
+                print(f"[Rank {self.global_rank}]: Total training time: {self.total_training_time:.2f} seconds")
+
+                # Record max_memory_usage (more robust handling)
+                memory_stats = torch.cuda.memory_stats(device)
                 if self.args.run_type == 'baseline':
                     if self.global_rank == 0:
-                        checkpoint = {
-                            'epoch': epoch + 1,
-                            'model_state_dict': self.model.state_dict(),
-                            'optimizer_state_dict': self.optimizer.state_dict(),
-                        }
-                        checkpoint_path = os.path.join(self.args.checkpoint_path, f"baseline_epoch-{epoch+1}.pt")
-                        torch.save(checkpoint, checkpoint_path)
-                        print(f"[Rank {global_rank}]: Baseline checkpoint saved at epoch {epoch+1} to {checkpoint_path}")
-                elif self.args.run_type == 'optimized':
-                    
-                    checkpoint = self.model_engine.save_checkpoint(self.args.checkpoint_path, tag=f"epoch-{epoch+1}")
-                    print(f"[Rank {global_rank}]: Optimized checkpoint saved at epoch {epoch+1} to {checkpoint}")
-                print(f"[Rank {global_rank}]: Completed checkpoint saving after Epoch {epoch + 1}")
+                        if "max_memory_allocated" in memory_stats:
+                            max_memory = memory_stats["max_memory_allocated"] / (1024**2) # Convert to MB
+                        elif "allocated_bytes.all.peak" in memory_stats:
+                            max_memory = memory_stats["allocated_bytes.all.peak"] / (1024**2)
+                        else:
+                            max_memory = 0.0 # Default to 0
+                        self.baseline_metrics["max_memory_usage"] = [max_memory]  # Store as a list
+                        print("Baseline metrics:", self.baseline_metrics)
 
-                # Adding barrier to ensure all ranks have completed the epoch before proceeding
-                if dist.is_available() and dist.is_initialized():
-                    print(f"[Rank {global_rank}]: Waiting at barrier after Epoch {epoch + 1}")
-                    dist.barrier()
-                    print(f"[Rank {global_rank}]: Passed barrier after Epoch {epoch + 1}")
+                else:
+                    # Only collect metrics on rank 0 for optimized runs
+                    if self.global_rank == 0:
+                        if "max_memory_allocated" in memory_stats:
+                            max_memory = memory_stats["max_memory_allocated"] / (1024**2)
+                        elif "allocated_bytes.all.peak" in memory_stats:
+                            max_memory = memory_stats["allocated_bytes.all.peak"] / (1024**2)
+                        else:
+                            max_memory = 0.0
+                        self.optimized_metrics["max_memory_usage"] = [max_memory]
+                        print("Optimized metrics:", self.optimized_metrics)
 
-                # Continue to next epoch
-                print(f"[Rank {global_rank}]: Moving to the next epoch")
-
-            # Store the end time of training
-            self.train_end_time = time.time()
-            self.total_training_time = self.train_end_time - self.train_start_time
-            print(f"[Rank {global_rank}]: Total training time: {self.total_training_time:.2f} seconds")
-
-            if self.args.run_type == 'baseline':
-                if global_rank == 0:
-                    if 'peak_bytes_allocated' in memory_stats:
-                        self.baseline_metrics.setdefault("max_memory_usage", []).append(torch.cuda.max_memory_allocated(device) / (1024**2))
-                    else:
-                        self.baseline_metrics.setdefault("max_memory_usage", []).append(0.0)
-                    print("Baseline metrics:", self.baseline_metrics)
-
-            else:
-                # Only collect metrics on rank 0 for optimized runs
-                if global_rank == 0:
-                    if 'peak_bytes_allocated' in memory_stats:
-                        self.optimized_metrics.setdefault("max_memory_usage", []).append(torch.cuda.max_memory_allocated(device) / (1024**2))
-                    else:
-                        self.optimized_metrics.setdefault("max_memory_usage", []).append(0.0)
-                    print("Optimized metrics:", self.optimized_metrics)
+                # Save metrics after training
+                if self.args.run_type == 'baseline':
+                    if self.global_rank == 0:
+                        metrics_file_path = os.path.join(self.args.checkpoint_path, "baseline_metrics.json")
+                        self.save_metrics(self.baseline_metrics, metrics_file_path)
+                        print(f"[Rank {self.global_rank}]: Baseline metrics saved to {metrics_file_path}")
+                elif self.global_rank == 0:
+                    metrics_file_path = os.path.join(self.args.checkpoint_path, "optimized_metrics.json")
+                    self.save_metrics(self.optimized_metrics, metrics_file_path)
+                    print(f"[Rank {self.global_rank}]: Optimized metrics saved to {metrics_file_path}")
 
     def validate(self):
         if self.args.run_type == 'baseline':
@@ -625,7 +668,8 @@ class GPT2Trainer:
         self.generate_time = self.generate_end_time - self.generate_start_time
         generated_text = self.tokenizer.decode(generated.squeeze(), skip_special_tokens=True)
         num_generated_tokens = generated.shape[1] - input_ids.shape[1]
-        self.throughput = num_generated_tokens / self.generate_time
+        # Correctly calculate throughput (tokens/second)
+        self.throughput = num_generated_tokens / self.generate_time if self.generate_time > 0 else 0
 
         print(f"Inference Latency: {self.generate_time:.4f} seconds")
         print(f"Inference Throughput: {self.throughput:.2f} tokens/second")
@@ -634,10 +678,18 @@ class GPT2Trainer:
             self.baseline_metrics.setdefault("inference_latency", []).append(self.generate_time)
             self.baseline_metrics.setdefault("inference_throughput", []).append(self.throughput)
             print("Baseline metrics after inference:", self.baseline_metrics)
+            # Save metrics after inference for baseline
+            metrics_file_path = os.path.join(self.args.checkpoint_path, "baseline_metrics.json")
+            self.save_metrics(self.baseline_metrics, metrics_file_path)
+            print(f"[Rank {self.global_rank}]: Baseline metrics saved to {metrics_file_path}")
         else:
             self.optimized_metrics.setdefault("inference_latency", []).append(self.generate_time)
             self.optimized_metrics.setdefault("inference_throughput", []).append(self.throughput)
             print("Optimized metrics after inference:", self.optimized_metrics)
+            # Save metrics after inference for optimized
+            metrics_file_path = os.path.join(self.args.checkpoint_path, "optimized_metrics.json")
+            self.save_metrics(self.optimized_metrics, metrics_file_path)
+            print(f"[Rank {self.global_rank}]: Optimized metrics saved to {metrics_file_path}")
 
         return generated_text
 
@@ -654,6 +706,15 @@ class GPT2Trainer:
         if global_rank != 0:
             return
 
+        # Load baseline metrics from the correct path only when running optimized mode
+        if self.args.run_type == 'optimized':
+            baseline_metrics_path = os.path.join(self.args.checkpoint_path, "..", "baseline", "baseline_metrics.json")
+            if os.path.exists(baseline_metrics_path):
+                self.baseline_metrics = self.load_metrics(baseline_metrics_path)
+            else:
+                print(f"Warning: Baseline metrics file not found at {baseline_metrics_path}. Comparison will be skipped.")
+                return
+
         def get_last_or_default(metric_dict, key, default_value="N/A"):
             """
             Retrieve the last value from a metric list or return a default value.
@@ -664,10 +725,19 @@ class GPT2Trainer:
             else:
                 return val
 
-        def calculate_improvement(baseline, optimized):
+        def calculate_improvement(baseline, optimized, higher_is_better=False):
             """
             Calculate the percentage improvement between baseline and optimized metrics.
-            Returns "N/A" if either value is not numeric or if baseline is zero.
+
+            Args:
+                baseline: The baseline value.
+                optimized: The optimized value.
+                higher_is_better: True if a higher value is better (e.g., throughput),
+                                 False if a lower value is better (e.g., latency).
+
+            Returns:
+                The percentage improvement.
+                "N/A" if either value is not numeric or if the denominator is zero.
             """
             if baseline == "N/A" or optimized == "N/A":
                 return "N/A"
@@ -676,9 +746,15 @@ class GPT2Trainer:
                 optimized = float(optimized)
             except (ValueError, TypeError):
                 return "N/A"
-            if baseline == 0:
-                return "N/A" if optimized == 0 else "Inf improvement"
-            return ((baseline - optimized) / baseline) * 100
+
+            if higher_is_better:
+                if optimized == 0:
+                    return "N/A" if baseline == 0 else "Inf improvement"
+                return ((optimized - baseline) / optimized) * 100  # Inverted for throughput
+            else:
+                if baseline == 0:
+                    return "N/A" if optimized == 0 else "Inf improvement"
+                return ((baseline - optimized) / baseline) * 100
 
         def format_improvement(improvement):
             """
@@ -692,15 +768,15 @@ class GPT2Trainer:
         # Fetch the latest metrics
         baseline_train_time = get_last_or_default(self.baseline_metrics, 'train_time_per_epoch')
         optimized_train_time = get_last_or_default(self.optimized_metrics, 'train_time_per_epoch')
-        train_time_reduction = calculate_improvement(baseline_train_time, optimized_train_time)
+        train_time_reduction = calculate_improvement(baseline_train_time, optimized_train_time, higher_is_better=False)
 
         baseline_inference_latency = get_last_or_default(self.baseline_metrics, 'inference_latency')
         optimized_inference_latency = get_last_or_default(self.optimized_metrics, 'inference_latency')
-        inference_latency_improvement = calculate_improvement(baseline_inference_latency, optimized_inference_latency)
+        inference_latency_improvement = calculate_improvement(baseline_inference_latency, optimized_inference_latency, higher_is_better=False)
 
         baseline_inference_throughput = get_last_or_default(self.baseline_metrics, 'inference_throughput')
         optimized_inference_throughput = get_last_or_default(self.optimized_metrics, 'inference_throughput')
-        inference_throughput_improvement = calculate_improvement(baseline_inference_throughput, optimized_inference_throughput)
+        inference_throughput_improvement = calculate_improvement(baseline_inference_throughput, optimized_inference_throughput, higher_is_better=True)
 
         baseline_max_memory = get_last_or_default(self.baseline_metrics, 'max_memory_usage')
         optimized_max_memory = get_last_or_default(self.optimized_metrics, 'max_memory_usage')
@@ -715,7 +791,7 @@ class GPT2Trainer:
 
         baseline_train_throughput = get_last_or_default(self.baseline_metrics, 'train_throughput')
         optimized_train_throughput = get_last_or_default(self.optimized_metrics, 'train_throughput')
-        train_throughput_improvement = calculate_improvement(baseline_train_throughput, optimized_train_throughput)
+        train_throughput_improvement = calculate_improvement(baseline_train_throughput, optimized_train_throughput, higher_is_better=True)
 
         # Print Summary Table
         print("===== Summary of Main Results =====")
@@ -809,7 +885,7 @@ def main():
     parser.add_argument('--seq_length', type=int, default=1024, help='Sequence length for training')
 
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
+    parser.add_argument('--epochs', type=int, default=3, help='Number of epochs to train')
     parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=8, help='Micro batch size per GPU')
     parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='Number of gradient accumulation steps')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
@@ -876,7 +952,7 @@ def main():
     # Generate text and summarize results only on rank 0
     if global_rank == 0:
         prompt = "Once upon a time"
-        generated_text = trainer.generate_text(prompt, max_length=50)
+        generated_text = trainer.generate_text(prompt, max_length=256)
         print("Generated Text:")
         print(generated_text)
 
