@@ -1,0 +1,6 @@
+[submodule "src/flash_attention"]
+	path = src/flash_attention
+	url = https://github.com/HazyResearch/flash-attention.git
+[submodule "src/megatron_lm"]
+	path = src/megatron_lm
+	url = https://github.com/NVIDIA/Megatron-LM.git
