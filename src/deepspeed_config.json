@@ -27,8 +27,8 @@
   "pipeline": {
     "enabled": true,
     "micro_batch_size": 4,
-    "num_stages": 2,
-    "balance": [6, 6]
+    "num_stages": 4,
+    "balance": [3, 3, 3, 3]
   },
   "activation_checkpointing": {
     "partition_activations": true,
