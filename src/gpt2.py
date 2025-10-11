@@ -836,7 +836,7 @@ def main():
 
 
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
-    # parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=1, help='Micro batch size per GPU (overridden by deepspeed config)')
+    parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=4, help='Micro batch size per GPU (overridden by deepspeed config)')
     # parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Gradient accumulation steps (overridden by deepspeed config)')
     # parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate (can be overridden by deepspeed config scheduler)')
     # parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer')
