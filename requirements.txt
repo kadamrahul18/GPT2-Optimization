@@ -55,6 +55,7 @@ fonttools==4.60.1
 fqdn==1.5.1
 frozenlist==1.8.0
 fsspec==2025.9.0
+git-filter-repo==2.47.0
 google-pasta==0.2.0
 graphene==3.4.3
 graphql-core==3.2.6
@@ -69,6 +70,7 @@ huggingface-hub==0.35.3
 idna==3.10
 imageio==2.37.0
 importlib-metadata==6.11.0
+iniconfig==2.1.0
 ipykernel==6.29.5
 ipython==9.6.0
 ipython-genutils==0.2.0
@@ -148,6 +150,7 @@ pathos==0.3.4
 pexpect==4.9.0
 pillow==11.3.0
 platformdirs==4.4.0
+pluggy==1.6.0
 pox==0.3.6
 ppft==1.7.7
 prettytable==3.16.0
@@ -170,6 +173,7 @@ pygame==2.6.1
 Pygments==2.19.2
 pynvml==13.0.1
 pyparsing==3.2.5
+pytest==8.4.2
 python-dateutil==2.9.0.post0
 python-json-logger==4.0.0
 pytz==2025.2

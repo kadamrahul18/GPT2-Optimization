@@ -1,0 +1,15 @@
+# .gitignore
+
+# Python
+__pycache__/
+*.pyc
+
+# Data and Checkpoints
+/checkpoint/
+/data/
+/dataset/
+*.bin
+
+# Environment
+.venv/
+venv/

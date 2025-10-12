@@ -48,8 +48,8 @@ pip install -r requirements.txt
 
 ### 2. Data Preparation
 ```bash
-python download_data.py
-python preprocess_small.py
+python scripts/1_download_data.py
+python scripts/preprocess_small.py
 ```
 
 ### 3. Run the Single-GPU Baseline
@@ -81,7 +81,7 @@ time deepspeed src/gpt2.py \
 This command consumes the output of the previous steps to create the final visual.
 ```bash
 pip install matplotlib seaborn
-python generate_charts.py \
+python scripts/3_generate_charts.py \
     --baseline-json checkpoint/baseline_t4_small/training_metrics.json \
     --optimized-json checkpoint/optimized_t4_small/training_metrics.json
 ```
