@@ -1,5 +1,10 @@
 # Accelerating GPT-2 Training on Multi-GPU Systems with DeepSpeed
 
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-%23FF9900.svg?style=for-the-badge&logo=amazon-aws&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+
 This project demonstrates a successful strategy for drastically reducing the training time of a GPT-2 model by scaling from a single GPU to a multi-GPU cluster on **Amazon Web Services (AWS)** using the **DeepSpeed** library.
 
 The primary outcome was a **71% reduction in training time (a 3.5x speedup)**, showcasing a robust and reproducible MLOps workflow for distributed training.
