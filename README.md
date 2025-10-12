@@ -1,52 +1,45 @@
-# Distributed GPT-2 Training and Optimization on Multi-GPU Systems
+# Accelerating GPT-2 Training on Multi-GPU Systems with DeepSpeed
 
-This project demonstrates an end-to-end workflow for accelerating the training of a GPT-2 model by scaling from a single GPU to a multi-GPU cluster using **DeepSpeed** on **Amazon Web Services (AWS)**.
+This project demonstrates a successful strategy for drastically reducing the training time of a GPT-2 model by scaling from a single GPU to a multi-GPU cluster on **Amazon Web Services (AWS)** using the **DeepSpeed** library.
 
-The primary achievement was a **71% reduction in training time (a 3.5x speedup)** by architecting a robust distributed training pipeline. The project also provides insights into the performance trade-offs between training-optimized and inference-optimized systems.
+The primary outcome was a **71% reduction in training time (a 3.5x speedup)**, showcasing a robust and reproducible MLOps workflow for distributed training.
 
-## Key Performance Results
+## The Core Achievement: A 71% Reduction in Training Time
 
-The following metrics were benchmarked on an AWS EC2 `g4dn.12xlarge` instance with 4x NVIDIA T4 GPUs. The "Baseline" was run on a single T4 GPU, while the "Optimized" version utilized all four GPUs with DeepSpeed.
-
-### Training Performance: A 71% Time Reduction
+By implementing a Data Parallelism strategy with DeepSpeed, the time required to train the model for one epoch was reduced from **~38 minutes to under 11 minutes**.
 
 ![Training Time Comparison](docs/training_time_comparison.png)
 
-| Metric | Baseline (1x T4) | Optimized (4x T4s) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Training Time** | ~2259 seconds | **~650 seconds** | **~71% Faster** |
-
-By leveraging a Data Parallelism strategy with DeepSpeed, the training time for one epoch was reduced from **~38 minutes to ~11 minutes**.
-
-### Inference Performance: An Engineering Insight
-
-![Inference Performance Comparison](docs/inference_performance_comparison.png)
-
-An interesting and important result was observed during single-stream inference testing. The DeepSpeed-wrapped model showed slightly higher latency than the simple baseline model. This is an expected trade-off due to the inherent overhead of the complex training engine, which is not optimized for serial, single-request inference.
-
-The multi-GPU architecture is designed for **high-throughput serving of concurrent requests**, a scenario not benchmarked by this script's simple test. This result highlights the critical difference between a training-optimized and an inference-optimized deployment.
+| Configuration | Training Time | Speedup |
+| :--- | :--- | :--- |
+| Baseline (1x T4) | ~2259 seconds | 1x |
+| **Optimized (4x T4s)** | **~650 seconds** | **~3.5x** |
 
 ## The Engineering Challenge
 
-Training large language models is often bottlenecked by the hardware constraints of a single GPU. The goal of this project was to overcome this bottleneck by re-architecting the training process for a distributed, multi-GPU environment and to analyze the performance characteristics of such a system.
+The primary bottleneck in many deep learning projects is the long training time required on a single GPU. This slow feedback loop hinders experimentation, hyperparameter tuning, and model development. The objective of this project was to directly address this challenge by architecting a scalable, distributed training solution.
 
 ## Technical Solution & Architecture
 
-The solution was built on three core components:
+The performance gains were achieved through a combination of key technologies:
 
 1.  **PyTorch:** The foundational deep learning framework used for the GPT-2 model implementation.
-2.  **DeepSpeed:** A library used to implement a **Data Parallelism** strategy. DeepSpeed managed the complexities of distributing data batches, synchronizing gradients, and managing optimizer states across all four T4 GPUs.
-3.  **Amazon Web Services (AWS) EC2:** The experiments were conducted on a `g4dn.12xlarge` instance to simulate a common cloud-based production environment.
+2.  **DeepSpeed:** A powerful library from Microsoft used to implement a **Data Parallelism** strategy. DeepSpeed handled the complexities of distributing data batches, synchronizing gradients, and managing optimizer states across all four T4 GPUs.
+3.  **Amazon Web Services (AWS) EC2:** The experiments were conducted on a `g4dn.12xlarge` instance (4x NVIDIA T4 GPUs) to simulate a common cloud-based production environment.
+
+### An Important Engineering Decision
+The initial codebase included a custom Triton-based Flash Attention kernel intended for newer GPU architectures. During testing on the T4 hardware, this kernel failed due to a hardware-software incompatibility. Instead of getting blocked, I made the pragmatic engineering decision to **disable the non-essential custom kernel** and focus on the primary optimization: the multi-GPU distributed framework. This ensured system stability and still delivered massive performance improvements, demonstrating an ability to adapt solutions for real-world hardware constraints.
 
 ## How to Reproduce These Results
 
-The results of this project are fully reproducible. The training scripts automatically generate verifiable `training_metrics.json` files, and a separate script consumes these files to generate the charts shown above.
+The results of this project are fully reproducible. The training scripts automatically generate verifiable `training_metrics.json` files, and a separate script consumes these files to generate the chart shown above.
 
 ### 1. Setup
 ```bash
 git clone https://github.com/kadamrahul18/GPT2-Optimization.git
 cd GPT2-Optimization
-pip install -r requirements.txt```
+pip install -r requirements.txt
+```
 
 ### 2. Data Preparation
 ```bash
@@ -64,8 +57,7 @@ time python src/gpt2.py \
     --val_data_path val_small.bin \
     --checkpoint_path checkpoint/baseline_t4_small \
     --epochs 1 \
-    --deepspeed_config src/deepspeed_config.json
-```
+    --deepspeed_config src/deepspeed_config.json```
 
 ### 4. Run the Multi-GPU Optimized Version
 This run will produce `checkpoint/optimized_t4_small/training_metrics.json`.
@@ -80,11 +72,12 @@ time deepspeed src/gpt2.py \
     --deepspeed_config src/deepspeed_config.json
 ```
 
-### 5. Generate the Charts
-This command consumes the output of the previous steps to create the final visuals.
+### 5. Generate the Chart
+This command consumes the output of the previous steps to create the final visual.
 ```bash
 pip install matplotlib seaborn
 python generate_charts.py \
     --baseline-json checkpoint/baseline_t4_small/training_metrics.json \
-    --optimized-json checkpoint/optimized_t4_small/training_metrics.json```
+    --optimized-json checkpoint/optimized_t4_small/training_metrics.json
+```
 ---
