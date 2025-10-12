@@ -1,0 +1,16 @@
+{
+    "train_time_per_epoch": [
+        650.3720889091492
+    ],
+    "train_loss_per_epoch": [
+        6.846416692993541
+    ],
+    "val_loss_per_epoch": [
+        6.181433599198048
+    ],
+    "train_throughput": [
+        11213.470141734131
+    ],
+    "inference_latency": 1.0160069465637207,
+    "inference_throughput": 98.4245239052884
+}

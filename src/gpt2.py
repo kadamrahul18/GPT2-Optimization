@@ -654,7 +654,7 @@ class GPT2Trainer:
              self.rank_print("Waiting at barrier after generation...")
              dist.barrier()
 
-        return generated_text
+        return generated_text, generate_time, throughput
 
     def save_metrics(self, metrics, file_path):
         if self.global_rank == 0:
@@ -874,10 +874,22 @@ def main():
 
     if trainer.global_rank == 0:
         prompt = "To be or not to be, that is the question:"
-        generated_text = trainer.generate_text(prompt, max_length=100)
+        # Capture the new return values: text, latency, and throughput
+        generated_text, latency, throughput = trainer.generate_text(prompt, max_length=100)
+        
         print("Generated Text:")
         print(generated_text)
 
+        # Add the inference metrics to the dictionary before saving
+        trainer.metrics["inference_latency"] = latency
+        trainer.metrics["inference_throughput"] = throughput
+        
+        # Now save the complete metrics
+        metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
+        trainer.save_metrics(trainer.metrics, metrics_file_path)
+        print(f"Final metrics including inference results saved to {metrics_file_path}")
+
+        # The summary functions can be run after, but are not essential for the charts
         trainer.summarize_results()
         trainer.print_kernel_comparison()
 
