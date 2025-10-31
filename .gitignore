@@ -1,15 +1,77 @@
 # .gitignore
 
-# Python
+# macOS
+.DS_Store
+
+# Python artefacts
 __pycache__/
-*.pyc
+*.py[cod]
+*.so
+*.pyd
+*.pyo
+*.egg-info/
+.eggs/
+*.spec
 
-# Data and Checkpoints
-/checkpoint/
-/data/
-/dataset/
-*.bin
+# Build outputs
+build/
+dist/
+*.whl
 
-# Environment
+# Virtual environments & local tooling
 .venv/
 venv/
+env/
+env.bak/
+.conda/
+.mamba/
+.python-version
+pip-wheel-metadata/
+*.env
+.envrc
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.ruff_cache/
+.cache/
+coverage/
+coverage.xml
+htmlcov/
+pytestdebug.log
+
+# Logs and checkpoints
+*.log
+*.out
+*.err
+*.ckpt
+*.pt
+*.pth
+runs/
+tensorboard/
+wandb/
+lightning_logs/
+
+# Data and generated artefacts
+/checkpoint/
+/checkpoints/
+/data/
+/dataset/
+/datasets/
+*.bin
+*.npz
+*.npy
+*.ptl
+*.tmp
+
+# Editors & IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.history/
+*.code-workspace
+
+# Misc
+Thumbs.db
