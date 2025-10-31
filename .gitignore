@@ -75,3 +75,7 @@ lightning_logs/
 
 # Misc
 Thumbs.db
+.gitmodules
+
+# Documentation
+AGENTS.md
