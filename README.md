@@ -22,7 +22,7 @@ By implementing a Data Parallelism strategy with DeepSpeed, the time required to
 
 ## The Engineering Challenge
 
-The primary bottleneck in many deep learning projects is the long training time required on a single GPU. This slow feedback loop hinders experimentation, hyperparameter tuning, and model development. The objective of this project was to directly address this challenge by architecting a scalable, distributed training solution.
+The primary bottleneck in many deep learning projects is the long training time required on a single GPU. This slow feedback loop hinders experimentation, hyperparameter tuning, and model development. The objective of this project was to directly address this challenge by implementing + benchmarking a scalable, distributed training solution.
 
 ## Technical Solution & Architecture
 
@@ -35,7 +35,18 @@ The performance gains were achieved through a combination of key technologies:
 ### An Important Engineering Decision
 The initial codebase included a custom Triton-based Flash Attention kernel intended for newer GPU architectures. During testing on the T4 hardware, this kernel failed due to a hardware-software incompatibility. Instead of getting blocked, I made the pragmatic engineering decision to **disable the non-essential custom kernel** and focus on the primary optimization: the multi-GPU distributed framework. This ensured system stability and still delivered massive performance improvements, demonstrating an ability to adapt solutions for real-world hardware constraints.
 
-## How to Reproduce These Results
+## DeepSpeed Config Notes
+
+- Pipeline parallelism is disabled in `src/deepspeed_config.json` because the training code does not use a DeepSpeed `PipelineModule`, so enabling it would be misleading.
+- `wall_clock_breakdown` is enabled to expose DeepSpeed timing breakdowns for training performance transparency.
+
+## Training Benchmark Protocol
+
+- Instance: `g4dn.12xlarge` (4x NVIDIA T4 GPUs).
+- 1 GPU baseline uses the standard Python entrypoint; 2 and 4 GPU runs use DeepSpeed.
+- Fixed `seq_len`, fixed dataset subset size, and fixed hyperparameters across runs.
+
+## Reproduce Results
 
 The results of this project are fully reproducible. The training scripts automatically generate verifiable `training_metrics.json` files, and a separate script consumes these files to generate the chart shown above.
 
@@ -52,8 +63,8 @@ python scripts/1_download_data.py
 python scripts/preprocess_small.py
 ```
 
-### 3. Run the Single-GPU Baseline
-This run will produce `checkpoint/baseline_t4_small/training_metrics.json`.
+### 3. Run the Single-GPU Baseline (1 GPU)
+This run will produce `checkpoint/scaling_runs/1gpu_baseline/<run_id>/training_metrics.json` when using the scaling script, or `checkpoint/baseline_t4_small/training_metrics.json` if run manually.
 ```bash
 export CUDA_VISIBLE_DEVICES=0
 time python src/gpt2.py \
@@ -62,27 +73,47 @@ time python src/gpt2.py \
     --val_data_path val_small.bin \
     --checkpoint_path checkpoint/baseline_t4_small \
     --epochs 1 \
-    --deepspeed_config src/deepspeed_config.json```
+    --seq_length 512 \
+    --deepspeed_config src/deepspeed_config.json
+```
 
-### 4. Run the Multi-GPU Optimized Version
-This run will produce `checkpoint/optimized_t4_small/training_metrics.json`.
+### 4. Run the Multi-GPU Optimized Version (2 or 4 GPUs)
+This run will produce `checkpoint/optimized_t4_small/training_metrics.json` if run manually.
 ```bash
-unset CUDA_VISIBLE_DEVICES
+export CUDA_VISIBLE_DEVICES=0,1
 time deepspeed src/gpt2.py \
     --run_type optimized \
     --train_data_path train_small.bin \
     --val_data_path val_small.bin \
     --checkpoint_path checkpoint/optimized_t4_small \
     --epochs 1 \
+    --seq_length 512 \
     --deepspeed_config src/deepspeed_config.json
 ```
 
-### 5. Generate the Chart
-This command consumes the output of the previous steps to create the final visual.
+### 5. Run the Scaling Benchmarks (1, 2, 4 GPUs)
+This command runs all three configurations on a single `g4dn.12xlarge` instance and produces `scaling_report.json`.
+```bash
+python scripts/run_scaling_benchmarks.py \
+    --epochs 1 \
+    --seq_len 512 \
+    --dataset_mode small \
+    --deepspeed_config src/deepspeed_config.json
+```
+
+### 6. Generate the Chart
+This command consumes the output of the manual baseline + optimized runs to create the final visual.
 ```bash
 pip install matplotlib seaborn
 python scripts/3_generate_charts.py \
     --baseline-json checkpoint/baseline_t4_small/training_metrics.json \
     --optimized-json checkpoint/optimized_t4_small/training_metrics.json
 ```
+
+## Artifacts
+
+- `training_metrics.json` includes a versioned training-only schema with per-epoch `tokens_per_sec_global`, `epoch_wall_time_sec`, and rank-0 CUDA memory stats.
+- `scaling_report.json` aggregates per-run throughput and epoch time. It computes:
+  - `speedup_vs_1gpu = throughput_N / throughput_1gpu` (or inverse epoch time if throughput is missing)
+  - `scaling_efficiency = speedup_vs_1gpu / N`
 ---

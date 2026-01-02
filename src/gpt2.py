@@ -15,6 +15,7 @@ import torch.profiler
 import copy
 import torch.distributed as dist
 import tiktoken
+import metrics as metrics_utils
 
 from transformers import GPT2Tokenizer
 
@@ -273,6 +274,19 @@ class GPT2Trainer:
              self.rank_print(f"ERROR: Failed to load DeepSpeed config: {e}")
              sys.exit(1)
 
+        self.deepspeed_config = deepspeed_config
+        if self.global_rank == 0:
+            ds_micro_batch = self.deepspeed_config.get("train_micro_batch_size_per_gpu")
+            ds_grad_accum = self.deepspeed_config.get("gradient_accumulation_steps", 1)
+            micro_batch = ds_micro_batch if ds_micro_batch is not None else self.args.train_micro_batch_size_per_gpu
+            global_batch = micro_batch * ds_grad_accum * self.world_size
+            visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            self.rank_print(
+                "Run config: seq_len=%s, micro_batch_size_per_gpu=%s, grad_accum_steps=%s, "
+                "global_batch_size=%s, visible_gpus=%s"
+                % (self.args.seq_length, micro_batch, ds_grad_accum, global_batch, visible_gpus)
+            )
+
         self.rank_print("Initializing DeepSpeed engine...")
         try:
              self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
@@ -311,17 +325,20 @@ class GPT2Trainer:
              self.rank_print("Validation dataset is empty, skipping validation dataloader creation.")
              self.val_dataloader = None
 
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.metrics = metrics_utils.build_initial_metrics(
+            args=self.args,
+            ds_config=self.deepspeed_config,
+            train_dataset=self.train_dataset,
+            val_dataset=self.val_dataset,
+            world_size=self.world_size,
+            repo_root=repo_root,
+            ds_config_path=args.deepspeed_config,
+        )
 
         if args.resume:
              self.rank_print(f"Attempting to resume from checkpoint path: {args.checkpoint_path}")
              pass
-
-        self.metrics = {
-            "train_time_per_epoch": [],
-            "train_loss_per_epoch": [],
-            "val_loss_per_epoch": [],
-            "train_throughput": []
-        }
 
         self.rank_print(f"GPT2Trainer initialization complete for Rank {self.global_rank}.")
 
@@ -357,8 +374,14 @@ class GPT2Trainer:
 
         for epoch in range(self.start_epoch, self.args.epochs):
             self.rank_print(f"Starting Epoch {epoch + 1}/{self.args.epochs}")
+            if dist.is_available() and dist.is_initialized():
+                 dist.barrier()
+
+            if torch.cuda.is_available():
+                 torch.cuda.reset_peak_memory_stats(self.current_device)
+
             if self.global_rank == 0:
-                self.epoch_start_time = time.time()
+                 self.epoch_start_time = time.time()
 
             self.model_engine.train()
 
@@ -375,6 +398,11 @@ class GPT2Trainer:
             total_train_loss_epoch = 0.0
             num_tokens_processed_epoch = 0
             num_steps_epoch = 0
+            step_time_samples = []
+            dataload_time_samples = []
+            cuda_step_time_samples = []
+            timing_warmup_steps = 5
+            timing_sample_every = 50
 
             if dist.is_available() and dist.is_initialized():
                  self.rank_print(f"Waiting at barrier: Start of Epoch {epoch+1} loop...")
@@ -382,7 +410,8 @@ class GPT2Trainer:
                  self.rank_print(f"Passed barrier: Start of Epoch {epoch+1} loop.")
 
 
-            for step, batch in enumerate(self.train_dataloader):
+            train_iter = iter(self.train_dataloader)
+            for step in range(len(self.train_dataloader)):
                  if dist.is_available() and dist.is_initialized():
                       if step % 50 == 0:
                            print(f"[Rank {self.global_rank}] Waiting at barrier: Start of Step {step}, Epoch {epoch+1}")
@@ -391,12 +420,27 @@ class GPT2Trainer:
                            print(f"[Rank {self.global_rank}] Passed barrier: Start of Step {step}, Epoch {epoch+1}")
 
 
+                 dataload_start = time.perf_counter()
+                 try:
+                      batch = next(train_iter)
+                 except StopIteration:
+                      break
+                 dataload_end = time.perf_counter()
                  input_ids, targets = batch
                  input_ids = input_ids.to(self.current_device)
                  targets = targets.to(self.current_device)
                  inputs = (input_ids, None)
+                 sample_timing = self.global_rank == 0 and step >= timing_warmup_steps and step % timing_sample_every == 0
+                 start_event = None
+                 end_event = None
+                 if sample_timing and torch.cuda.is_available():
+                      start_event = torch.cuda.Event(enable_timing=True)
+                      end_event = torch.cuda.Event(enable_timing=True)
 
                  try:
+                      step_start = time.perf_counter()
+                      if start_event is not None:
+                           start_event.record()
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Starting forward pass, Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
                       outputs = self.model_engine(*inputs)
@@ -415,6 +459,7 @@ class GPT2Trainer:
                           outputs.view(-1, self.args.vocab_size), targets.view(-1)
                       )
                       batch_loss = loss.item()
+                      batch_tokens = input_ids.numel()
                       if step % 50 == 0 or step < 5:
                           print(f"[Rank {self.global_rank}]: Computed loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
@@ -437,6 +482,9 @@ class GPT2Trainer:
                       self.model_engine.step()
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Completed optimizer step, Step {step}, Epoch {epoch+1}")
+                      if end_event is not None:
+                           end_event.record()
+                      step_end = time.perf_counter()
 
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during backward/step: Step {step}, Epoch {epoch+1}: {e}")
@@ -445,15 +493,22 @@ class GPT2Trainer:
                       if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
+                 if sample_timing:
+                      step_time_samples.append(step_end - step_start)
+                      dataload_time_samples.append(dataload_end - dataload_start)
+                      if start_event is not None and end_event is not None:
+                           torch.cuda.synchronize()
+                           cuda_ms = start_event.elapsed_time(end_event)
+                           cuda_step_time_samples.append(cuda_ms / 1000.0)
+
+                 total_train_loss_epoch += batch_loss * batch_tokens
+                 num_tokens_processed_epoch += batch_tokens
+                 num_steps_epoch += 1
 
                  if self.global_rank == 0:
-                      total_train_loss_epoch += batch_loss
-                      num_tokens_processed_epoch += input_ids.numel()
-                      num_steps_epoch += 1
-
                       if progress_bar:
-                          progress_bar.update(1)
-                          progress_bar.set_postfix(loss=batch_loss)
+                           progress_bar.update(1)
+                           progress_bar.set_postfix(loss=batch_loss)
 
                       if step % self.log_interval == 0:
                            try:
@@ -470,21 +525,87 @@ class GPT2Trainer:
                  if prof:
                       prof.step()
 
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+
+            if dist.is_available() and dist.is_initialized():
+                loss_tokens = torch.tensor(
+                    [total_train_loss_epoch, num_tokens_processed_epoch],
+                    device=self.current_device,
+                    dtype=torch.float64,
+                )
+                dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+                steps_tensor = torch.tensor(
+                    [num_steps_epoch],
+                    device=self.current_device,
+                    dtype=torch.float64,
+                )
+                dist.all_reduce(steps_tensor, op=dist.ReduceOp.MAX)
+                global_steps = int(steps_tensor.item())
+                global_loss_sum = loss_tokens[0].item()
+                global_tokens = loss_tokens[1].item()
+            else:
+                global_steps = num_steps_epoch
+                global_loss_sum = total_train_loss_epoch
+                global_tokens = num_tokens_processed_epoch
+
+            max_alloc = 0
+            max_reserved = 0
+            max_alloc_global = None
+            max_reserved_global = None
+            if torch.cuda.is_available():
+                max_alloc = torch.cuda.max_memory_allocated(self.current_device)
+                max_reserved = torch.cuda.max_memory_reserved(self.current_device)
+                if dist.is_available() and dist.is_initialized():
+                    mem_tensor = torch.tensor(
+                        [max_alloc, max_reserved],
+                        device=self.current_device,
+                        dtype=torch.float64,
+                    )
+                    dist.all_reduce(mem_tensor, op=dist.ReduceOp.MAX)
+                    max_alloc_global = int(mem_tensor[0].item())
+                    max_reserved_global = int(mem_tensor[1].item())
+
             if self.global_rank == 0:
                 if progress_bar:
                     progress_bar.close()
                 self.epoch_end_time = time.time()
                 self.epoch_time = self.epoch_end_time - self.epoch_start_time
 
-                avg_loss_epoch = total_train_loss_epoch / num_steps_epoch if num_steps_epoch > 0 else 0
-                approx_total_tokens = num_tokens_processed_epoch * self.world_size
-                train_throughput = approx_total_tokens / self.epoch_time if self.epoch_time > 0 else 0
+                avg_loss_epoch = global_loss_sum / global_tokens if global_tokens > 0 else 0.0
+                train_throughput = global_tokens / self.epoch_time if self.epoch_time > 0 else 0.0
 
-                self.rank_print(f"Epoch {epoch+1} finished. Avg Loss: {avg_loss_epoch:.4f}, Time: {self.epoch_time:.2f}s, Approx Throughput: {train_throughput:.2f} tokens/sec")
+                self.rank_print(
+                    f"Epoch {epoch+1} finished. Avg Loss: {avg_loss_epoch:.4f}, "
+                    f"Time: {self.epoch_time:.2f}s, Throughput: {train_throughput:.2f} tokens/sec"
+                )
 
-                self.metrics["train_time_per_epoch"].append(self.epoch_time)
-                self.metrics["train_loss_per_epoch"].append(avg_loss_epoch)
-                self.metrics["train_throughput"].append(train_throughput)
+                step_samples = cuda_step_time_samples if cuda_step_time_samples else step_time_samples
+                step_time_mean = float(np.mean(step_samples)) if step_samples else None
+                step_time_p50 = float(np.percentile(step_samples, 50)) if step_samples else None
+                step_time_p95 = float(np.percentile(step_samples, 95)) if step_samples else None
+                dataload_time_mean = float(np.mean(dataload_time_samples)) if dataload_time_samples else None
+
+                epoch_metrics = {
+                    "epoch_idx": epoch + 1,
+                    "epoch_wall_time_sec": self.epoch_time,
+                    "steps": global_steps,
+                    "tokens_processed_global": int(global_tokens),
+                    "tokens_per_sec_global": train_throughput,
+                    "train_loss_avg_global": avg_loss_epoch,
+                    "val_loss_avg_global": None,
+                    "max_cuda_mem_allocated_bytes_rank0": int(max_alloc),
+                    "max_cuda_mem_reserved_bytes_rank0": int(max_reserved),
+                    "step_time_mean_sec": step_time_mean,
+                    "step_time_p50_sec": step_time_p50,
+                    "step_time_p95_sec": step_time_p95,
+                    "dataload_time_mean_sec": dataload_time_mean,
+                }
+                if max_alloc_global is not None:
+                    epoch_metrics["max_cuda_mem_allocated_bytes_global"] = max_alloc_global
+                    epoch_metrics["max_cuda_mem_reserved_bytes_global"] = max_reserved_global
+
+                self.metrics["epochs"].append(epoch_metrics)
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier before validation, Epoch {epoch+1}...")
@@ -492,7 +613,9 @@ class GPT2Trainer:
                 self.rank_print(f"Passed barrier, starting validation, Epoch {epoch+1}.")
 
             if self.val_dataloader:
-                self.validate(epoch)
+                val_loss_avg = self.validate(epoch)
+                if self.global_rank == 0 and self.metrics["epochs"]:
+                    self.metrics["epochs"][-1]["val_loss_avg_global"] = val_loss_avg
             else:
                 self.rank_print("Skipping validation as dataloader is not available.")
 
@@ -527,6 +650,25 @@ class GPT2Trainer:
                  prof.__exit__(None, None, None)
                  self.rank_print("Profiler stopped.")
 
+            per_epoch = self.metrics.get("epochs", [])
+            if per_epoch:
+                mean_tokens_per_sec = sum(
+                    epoch.get("tokens_per_sec_global", 0.0) for epoch in per_epoch
+                ) / len(per_epoch)
+                val_losses = [
+                    epoch.get("val_loss_avg_global")
+                    for epoch in per_epoch
+                    if epoch.get("val_loss_avg_global") is not None
+                ]
+                best_val_loss = min(val_losses) if val_losses else None
+            else:
+                mean_tokens_per_sec = None
+                best_val_loss = None
+
+            self.metrics["summary"]["total_wall_time_sec"] = self.total_training_time
+            self.metrics["summary"]["best_val_loss"] = best_val_loss
+            self.metrics["summary"]["mean_tokens_per_sec_global"] = mean_tokens_per_sec
+
             metrics_file_path = os.path.join(self.args.checkpoint_path, "training_metrics.json")
             self.save_metrics(self.metrics, metrics_file_path)
             self.rank_print(f"Final metrics saved to {metrics_file_path}")
@@ -541,8 +683,8 @@ class GPT2Trainer:
         self.rank_print(f"Starting validation for Epoch {epoch+1}")
         self.model_engine.eval()
 
-        total_loss = 0.0
-        total_steps = 0
+        total_loss_sum = 0.0
+        total_tokens = 0
 
         val_progress_bar = None
         if self.global_rank == 0:
@@ -565,15 +707,15 @@ class GPT2Trainer:
 
                       loss = F.cross_entropy(outputs.view(-1, self.args.vocab_size), targets.view(-1))
                       batch_loss = loss.item()
+                      batch_tokens = input_ids.numel()
                       if step % 20 == 0 or step < 3:
                            print(f"[Rank {self.global_rank}]: Validation Loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
-                      if self.global_rank == 0:
-                           total_loss += batch_loss
-                           total_steps += 1
-                           if val_progress_bar:
-                               val_progress_bar.update(1)
-                               val_progress_bar.set_postfix(loss=batch_loss)
+                      total_loss_sum += batch_loss * batch_tokens
+                      total_tokens += batch_tokens
+                      if self.global_rank == 0 and val_progress_bar:
+                          val_progress_bar.update(1)
+                          val_progress_bar.set_postfix(loss=batch_loss)
 
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during validation: Step {step}, Epoch {epoch+1}: {e}")
@@ -582,22 +724,32 @@ class GPT2Trainer:
                       if dist.is_available() and dist.is_initialized(): dist.barrier()
                       break
 
+        if dist.is_available() and dist.is_initialized():
+            loss_tokens = torch.tensor(
+                [total_loss_sum, total_tokens],
+                device=self.current_device,
+                dtype=torch.float64,
+            )
+            dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+            global_loss_sum = loss_tokens[0].item()
+            global_tokens = loss_tokens[1].item()
+        else:
+            global_loss_sum = total_loss_sum
+            global_tokens = total_tokens
+
+        avg_loss = global_loss_sum / global_tokens if global_tokens > 0 else 0.0
+
         if self.global_rank == 0:
             if val_progress_bar:
                 val_progress_bar.close()
-
-            avg_loss = total_loss / total_steps if total_steps > 0 else 0.0
             self.rank_print(f"Validation Finished Epoch {epoch+1}. Average Loss: {avg_loss:.4f}")
-
-            self.metrics["val_loss_per_epoch"].append(avg_loss)
-        else:
-             if "val_loss_per_epoch" in self.metrics:
-                 pass
+            return avg_loss
 
         if dist.is_available() and dist.is_initialized():
              self.rank_print(f"Waiting at barrier after validation, Epoch {epoch+1}...")
              dist.barrier()
              self.rank_print(f"Passed barrier after validation, Epoch {epoch+1}.")
+        return None
 
 
     def generate_text(self, prompt, max_length=50):
@@ -660,9 +812,7 @@ class GPT2Trainer:
         if self.global_rank == 0:
             self.rank_print(f"Saving metrics to {file_path}")
             try:
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, 'w') as f:
-                    json.dump(metrics, f, indent=4)
+                metrics_utils.write_json_atomic(file_path, metrics)
             except Exception as e:
                  self.rank_print(f"ERROR: Failed to save metrics to {file_path}: {e}")
 
@@ -687,6 +837,10 @@ class GPT2Trainer:
 
     def summarize_results(self):
         if self.global_rank != 0:
+            return
+
+        if self.metrics.get("schema_version") != "2.0":
+            self.rank_print("Skipping summary: metrics schema not supported for comparison.")
             return
 
         self.rank_print("Summarizing results (comparison assumes baseline metrics are available).")
@@ -723,31 +877,22 @@ class GPT2Trainer:
             if isinstance(improvement, (int, float)): return f"{improvement:.2f}%"
             else: return improvement
 
-        baseline_train_time = get_last_or_default(self.baseline_metrics, 'train_time_per_epoch')
-        optimized_train_time = get_last_or_default(self.optimized_metrics, 'train_time_per_epoch')
+        baseline_train_time = get_last_or_default(self.baseline_metrics.get("summary", {}), 'total_wall_time_sec')
+        optimized_train_time = get_last_or_default(self.optimized_metrics.get("summary", {}), 'total_wall_time_sec')
         train_time_reduction = calculate_improvement(baseline_train_time, optimized_train_time, higher_is_better=False)
 
-        baseline_inference_latency = get_last_or_default(self.baseline_metrics, 'inference_latency')
-        optimized_inference_latency = get_last_or_default(self.optimized_metrics, 'inference_latency')
-        inference_latency_improvement = calculate_improvement(baseline_inference_latency, optimized_inference_latency, higher_is_better=False)
-
-        baseline_inference_throughput = get_last_or_default(self.baseline_metrics, 'inference_throughput')
-        optimized_inference_throughput = get_last_or_default(self.optimized_metrics, 'inference_throughput')
-        inference_throughput_improvement = calculate_improvement(baseline_inference_throughput, optimized_inference_throughput, higher_is_better=True)
+        baseline_max_memory = "N/A"
+        optimized_max_memory = "N/A"
+        memory_reduction = "N/A"
 
 
-        baseline_max_memory = get_last_or_default(self.baseline_metrics, 'max_memory_usage')
-        optimized_max_memory = get_last_or_default(self.optimized_metrics, 'max_memory_usage')
-        memory_reduction = calculate_improvement(baseline_max_memory, optimized_max_memory, higher_is_better=False)
-
-
-        baseline_val_loss = get_last_or_default(self.baseline_metrics, 'val_loss_per_epoch')
-        optimized_val_loss = get_last_or_default(self.optimized_metrics, 'val_loss_per_epoch')
+        baseline_val_loss = get_last_or_default(self.baseline_metrics.get("summary", {}), 'best_val_loss')
+        optimized_val_loss = get_last_or_default(self.optimized_metrics.get("summary", {}), 'best_val_loss')
         loss_improvement = calculate_improvement(baseline_val_loss, optimized_val_loss, higher_is_better=False)
 
 
-        baseline_train_throughput = get_last_or_default(self.baseline_metrics, 'train_throughput')
-        optimized_train_throughput = get_last_or_default(self.optimized_metrics, 'train_throughput')
+        baseline_train_throughput = get_last_or_default(self.baseline_metrics.get("summary", {}), 'mean_tokens_per_sec_global')
+        optimized_train_throughput = get_last_or_default(self.optimized_metrics.get("summary", {}), 'mean_tokens_per_sec_global')
         train_throughput_improvement = calculate_improvement(baseline_train_throughput, optimized_train_throughput, higher_is_better=True)
 
 
@@ -757,8 +902,6 @@ class GPT2Trainer:
         print(f"| Train Time/Epoch (s)          | {baseline_train_time: <12} | {optimized_train_time: <12} | {format_improvement(train_time_reduction): <17} |")
         print(f"| Validation Loss                 | {baseline_val_loss: <12} | {optimized_val_loss: <12} | {format_improvement(loss_improvement): <17} |")
         print(f"| Train Throughput (tokens/s)   | {baseline_train_throughput: <12} | {optimized_train_throughput: <12} | {format_improvement(train_throughput_improvement): <17} |")
-        print(f"| Inference Latency (s)         | {baseline_inference_latency: <12} | {optimized_inference_latency: <12} | {format_improvement(inference_latency_improvement): <17} |")
-        print(f"| Inference Throughput (tokens/s) | {baseline_inference_throughput: <12} | {optimized_inference_throughput: <12} | {format_improvement(inference_throughput_improvement): <17} |")
         print(f"| Max Memory Usage (MB)         | {baseline_max_memory: <12} | {optimized_max_memory: <12} | {format_improvement(memory_reduction): <17} |")
 
 
@@ -873,23 +1016,6 @@ def main():
     trainer.train()
 
     if trainer.global_rank == 0:
-        prompt = "To be or not to be, that is the question:"
-        # Capture the new return values: text, latency, and throughput
-        generated_text, latency, throughput = trainer.generate_text(prompt, max_length=100)
-        
-        print("Generated Text:")
-        print(generated_text)
-
-        # Add the inference metrics to the dictionary before saving
-        trainer.metrics["inference_latency"] = latency
-        trainer.metrics["inference_throughput"] = throughput
-        
-        # Now save the complete metrics
-        metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
-        trainer.save_metrics(trainer.metrics, metrics_file_path)
-        print(f"Final metrics including inference results saved to {metrics_file_path}")
-
-        # The summary functions can be run after, but are not essential for the charts
         trainer.summarize_results()
         trainer.print_kernel_comparison()
 
