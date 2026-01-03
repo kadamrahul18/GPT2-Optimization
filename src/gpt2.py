@@ -26,6 +26,37 @@ def get_dist_info(args):
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     return local_rank, rank, world_size
 
+
+def resolve_batch_config(args, ds_config, visible_gpus):
+    micro_batch = (
+        args.micro_batch_size_per_gpu
+        if args.micro_batch_size_per_gpu is not None
+        else ds_config.get("train_micro_batch_size_per_gpu", args.train_micro_batch_size_per_gpu)
+    )
+    grad_accum = (
+        args.grad_accum_steps
+        if args.grad_accum_steps is not None
+        else ds_config.get("gradient_accumulation_steps", 1)
+    )
+
+    if args.global_batch_size is not None and args.grad_accum_steps is None:
+        denom = micro_batch * visible_gpus
+        if denom <= 0 or args.global_batch_size % denom != 0:
+            raise ValueError(
+                "global_batch_size must be divisible by micro_batch_size_per_gpu * visible_gpus"
+            )
+        grad_accum = args.global_batch_size // denom
+
+    global_batch = micro_batch * grad_accum * visible_gpus
+
+    if args.enforce_global_batch_size is not None and global_batch != args.enforce_global_batch_size:
+        raise ValueError(
+            f"Computed global_batch_size={global_batch} does not match enforce_global_batch_size="
+            f"{args.enforce_global_batch_size}"
+        )
+
+    return micro_batch, grad_accum, global_batch
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -297,23 +328,33 @@ class GPT2Trainer:
              self.rank_print(f"ERROR: Failed to load DeepSpeed config: {e}")
              sys.exit(1)
 
+        if args.micro_batch_size_per_gpu is not None:
+            deepspeed_config["train_micro_batch_size_per_gpu"] = args.micro_batch_size_per_gpu
+        if args.grad_accum_steps is not None:
+            deepspeed_config["gradient_accumulation_steps"] = args.grad_accum_steps
+
         self.deepspeed_config = deepspeed_config
+        visible_gpus = self.world_size if self.use_deepspeed else 1
+        try:
+            self.micro_batch_size, self.grad_accum_steps, self.global_batch_size = resolve_batch_config(
+                args=self.args,
+                ds_config=self.deepspeed_config,
+                visible_gpus=visible_gpus,
+            )
+        except ValueError as e:
+            self.rank_print(f"ERROR: {e}")
+            sys.exit(1)
+
+        self.deepspeed_config["train_micro_batch_size_per_gpu"] = self.micro_batch_size
+        self.deepspeed_config["gradient_accumulation_steps"] = self.grad_accum_steps
+
         if self.global_rank == 0:
-            ds_micro_batch = self.deepspeed_config.get("train_micro_batch_size_per_gpu")
-            ds_grad_accum = self.deepspeed_config.get("gradient_accumulation_steps", 1)
-            micro_batch = ds_micro_batch if ds_micro_batch is not None else self.args.train_micro_batch_size_per_gpu
-            global_batch = micro_batch * ds_grad_accum * self.world_size
-            visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
             self.rank_print(
-                "Run config: seq_len=%s, micro_batch_size_per_gpu=%s, grad_accum_steps=%s, "
-                "global_batch_size=%s, visible_gpus=%s"
-                % (self.args.seq_length, micro_batch, ds_grad_accum, global_batch, visible_gpus)
+                "Run config: micro_batch_size_per_gpu=%s, grad_accum_steps=%s, visible_gpus=%s, "
+                "global_batch_size=%s"
+                % (self.micro_batch_size, self.grad_accum_steps, visible_gpus, self.global_batch_size)
             )
 
-        self.grad_accum_steps = self.deepspeed_config.get("gradient_accumulation_steps", 1)
-        self.micro_batch_size = self.deepspeed_config.get(
-            "train_micro_batch_size_per_gpu", self.args.train_micro_batch_size_per_gpu
-        )
         self.use_amp = (
             bool(self.deepspeed_config.get("fp16", {}).get("enabled"))
             and torch.cuda.is_available()
@@ -394,6 +435,9 @@ class GPT2Trainer:
             repo_root=repo_root,
             ds_config_path=args.deepspeed_config,
             precision_override=self.precision_mode,
+            micro_batch_size_per_gpu=self.micro_batch_size,
+            grad_accum_steps=self.grad_accum_steps,
+            global_batch_size=self.global_batch_size,
         )
 
         if args.resume:
@@ -1084,6 +1128,10 @@ def main():
 
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=4, help='Micro batch size per GPU (overridden by deepspeed config)')
+    parser.add_argument('--micro_batch_size_per_gpu', type=int, default=None, help='Override micro batch size per GPU')
+    parser.add_argument('--grad_accum_steps', type=int, default=None, help='Override gradient accumulation steps')
+    parser.add_argument('--global_batch_size', type=int, default=None, help='Override global batch size')
+    parser.add_argument('--enforce_global_batch_size', type=int, default=None, help='Fail if computed global batch size differs')
     # parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Gradient accumulation steps (overridden by deepspeed config)')
     # parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate (can be overridden by deepspeed config scheduler)')
     # parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer')

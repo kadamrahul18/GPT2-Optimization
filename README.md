@@ -45,6 +45,11 @@ The initial codebase included a custom Triton-based Flash Attention kernel inten
 - 1 GPU baseline uses the standard Python entrypoint; 2 and 4 GPU runs use DeepSpeed.
 - Fixed `seq_len`, fixed dataset subset size, and fixed hyperparameters across runs.
 - On Slurm, results include scheduler metadata in `training_metrics.json`.
+- For constant global batch size = 16:
+  - 1 GPU: `--micro_batch_size_per_gpu 4 --grad_accum_steps 4`
+  - 2 GPU: `--micro_batch_size_per_gpu 4 --grad_accum_steps 2`
+  - 4 GPU: `--micro_batch_size_per_gpu 4 --grad_accum_steps 1`
+- CLI batch flags override values in `src/deepspeed_config.json`.
 
 ## Reproduce Results
 

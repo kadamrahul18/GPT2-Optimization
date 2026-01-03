@@ -131,6 +131,9 @@ def build_initial_metrics(
     repo_root,
     ds_config_path,
     precision_override=None,
+    micro_batch_size_per_gpu=None,
+    grad_accum_steps=None,
+    global_batch_size=None,
 ):
     host_info = get_host_info()
     library_versions = get_library_versions()
@@ -144,9 +147,19 @@ def build_initial_metrics(
     val_sequences = len(val_dataset) if val_dataset is not None else 0
 
     seq_length = args.seq_length
-    micro_batch = ds_config.get("train_micro_batch_size_per_gpu", args.train_micro_batch_size_per_gpu)
-    grad_accum = ds_config.get("gradient_accumulation_steps", 1)
-    global_batch = micro_batch * grad_accum * world_size
+    micro_batch = (
+        micro_batch_size_per_gpu
+        if micro_batch_size_per_gpu is not None
+        else ds_config.get("train_micro_batch_size_per_gpu", args.train_micro_batch_size_per_gpu)
+    )
+    grad_accum = (
+        grad_accum_steps if grad_accum_steps is not None else ds_config.get("gradient_accumulation_steps", 1)
+    )
+    global_batch = (
+        global_batch_size
+        if global_batch_size is not None
+        else micro_batch * grad_accum * world_size
+    )
     optimizer = ds_config.get("optimizer", {})
     optimizer_lr = optimizer.get("params", {}).get("lr")
     if precision_override:
