@@ -8,6 +8,8 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+from env_detect import detect_instance_type, detect_slurm_context
+
 
 def safe_get_git_commit(repo_root):
     try:
@@ -125,7 +127,9 @@ def build_initial_metrics(args, ds_config, train_dataset, val_dataset, world_siz
     library_versions = get_library_versions()
     hardware = get_hardware_info(world_size)
     hardware["cuda_version"] = library_versions.get("cuda", "unknown")
-    hardware["instance_type"] = "g4dn.12xlarge"
+    instance_type = detect_instance_type()
+    if instance_type:
+        hardware["instance_type"] = instance_type
 
     train_sequences = len(train_dataset) if train_dataset is not None else 0
     val_sequences = len(val_dataset) if val_dataset is not None else 0
@@ -186,6 +190,9 @@ def build_initial_metrics(args, ds_config, train_dataset, val_dataset, world_siz
                 "wall_clock_breakdown": ds_config.get("wall_clock_breakdown"),
             },
         },
+        "schema_notes": {
+            "steps": "Deprecated; use micro_steps and optimizer_steps for clarity.",
+        },
         "epochs": [],
         "summary": {
             "total_wall_time_sec": None,
@@ -193,5 +200,12 @@ def build_initial_metrics(args, ds_config, train_dataset, val_dataset, world_siz
             "mean_tokens_per_sec_global": None,
         },
     }
+
+    slurm_context = detect_slurm_context()
+    if slurm_context:
+        metrics["scheduler"] = {"type": "slurm", **slurm_context}
+        metrics["hardware"]["cluster"] = "Big Purple"
+        if "instance_type" in metrics["hardware"]:
+            metrics["hardware"].pop("instance_type", None)
 
     return metrics

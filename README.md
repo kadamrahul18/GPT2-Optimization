@@ -42,9 +42,9 @@ The initial codebase included a custom Triton-based Flash Attention kernel inten
 
 ## Training Benchmark Protocol
 
-- Instance: `g4dn.12xlarge` (4x NVIDIA T4 GPUs).
 - 1 GPU baseline uses the standard Python entrypoint; 2 and 4 GPU runs use DeepSpeed.
 - Fixed `seq_len`, fixed dataset subset size, and fixed hyperparameters across runs.
+- On Slurm, results include scheduler metadata in `training_metrics.json`.
 
 ## Reproduce Results
 
@@ -63,7 +63,7 @@ python scripts/1_download_data.py
 python scripts/preprocess_small.py
 ```
 
-### 3. Run the Single-GPU Baseline (1 GPU)
+### 3. Run the Single-GPU Baseline (Local)
 This run will produce `checkpoint/scaling_runs/1gpu_baseline/<run_id>/training_metrics.json` when using the scaling script, or `checkpoint/baseline_t4_small/training_metrics.json` if run manually.
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -77,7 +77,7 @@ time python src/gpt2.py \
     --deepspeed_config src/deepspeed_config.json
 ```
 
-### 4. Run the Multi-GPU Optimized Version (2 or 4 GPUs)
+### 4. Run the Multi-GPU Optimized Version (Local, 2 or 4 GPUs)
 This run will produce `checkpoint/optimized_t4_small/training_metrics.json` if run manually.
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1
@@ -91,8 +91,8 @@ time deepspeed src/gpt2.py \
     --deepspeed_config src/deepspeed_config.json
 ```
 
-### 5. Run the Scaling Benchmarks (1, 2, 4 GPUs)
-This command runs all three configurations on a single `g4dn.12xlarge` instance and produces `scaling_report.json`.
+### 5. Run the Scaling Benchmarks (Local, 1/2/4 GPUs)
+This command runs all three configurations on a single machine and produces `scaling_report.json`.
 ```bash
 python scripts/run_scaling_benchmarks.py \
     --epochs 1 \
@@ -101,7 +101,10 @@ python scripts/run_scaling_benchmarks.py \
     --deepspeed_config src/deepspeed_config.json
 ```
 
-### 6. Generate the Chart
+### 6. Run the Scaling Benchmarks (Slurm)
+See `docs/HPC_SLURM.md` for an sbatch template and usage on Big Purple.
+
+### 7. Generate the Chart
 This command consumes the output of the manual baseline + optimized runs to create the final visual.
 ```bash
 pip install matplotlib seaborn

@@ -64,18 +64,74 @@ def test_scaling_report_computation(tmp_path):
     write_metrics(paths[4], throughput=320.0, epoch_time=3.5)
 
     report = module.build_scaling_report(
-        metrics_paths={1: str(paths[1]), 2: str(paths[2]), 4: str(paths[4])},
+        metrics_paths={1: [str(paths[1])], 2: [str(paths[2])], 4: [str(paths[4])]},
         seq_len=512,
         dataset_mode="small",
         instance_type="g4dn.12xlarge",
     )
 
     runs = report["runs"]
+    assert report["status"] == "ok"
     assert runs["1"]["speedup_vs_1gpu"] == 1.0
     assert runs["1"]["scaling_efficiency"] == 1.0
 
     assert abs(runs["2"]["speedup_vs_1gpu"] - 1.8) < 1e-6
     assert abs(runs["2"]["scaling_efficiency"] - 0.9) < 1e-6
+    assert runs["2"]["stdev_tokens_per_sec_global"] == 0.0
+    assert runs["2"]["stdev_epoch_wall_time_sec"] == 0.0
 
     assert abs(runs["4"]["speedup_vs_1gpu"] - 3.2) < 1e-6
     assert abs(runs["4"]["scaling_efficiency"] - 0.8) < 1e-6
+    assert runs["4"]["stdev_tokens_per_sec_global"] == 0.0
+    assert runs["4"]["stdev_epoch_wall_time_sec"] == 0.0
+
+
+def test_scaling_report_repeats_from_fixtures():
+    module = load_runner_module()
+    fixtures = Path(__file__).parent / "fixtures" / "repeat"
+    metrics_paths = {
+        1: [
+            str(fixtures / "1gpu_run1.json"),
+            str(fixtures / "1gpu_run2.json"),
+            str(fixtures / "1gpu_run3.json"),
+        ],
+        2: [
+            str(fixtures / "2gpu_run1.json"),
+            str(fixtures / "2gpu_run2.json"),
+            str(fixtures / "2gpu_run3.json"),
+        ],
+        4: [
+            str(fixtures / "4gpu_run1.json"),
+            str(fixtures / "4gpu_run2.json"),
+            str(fixtures / "4gpu_run3.json"),
+        ],
+    }
+
+    report = module.build_scaling_report(
+        metrics_paths=metrics_paths,
+        seq_len=512,
+        dataset_mode="small",
+        instance_type="g4dn.12xlarge",
+    )
+
+    runs = report["runs"]
+    assert abs(runs["1"]["mean_tokens_per_sec_global"] - 100.0) < 1e-6
+    assert abs(runs["1"]["stdev_tokens_per_sec_global"] - 5.0) < 1e-6
+    assert abs(runs["4"]["mean_tokens_per_sec_global"] - 320.0) < 1e-6
+    assert abs(runs["4"]["stdev_tokens_per_sec_global"] - 10.0) < 1e-6
+    assert runs["2"]["stdev_tokens_per_sec_global"] > 0.0
+
+
+def test_invariant_mismatch_report():
+    module = load_runner_module()
+    fixtures = Path(__file__).parent / "fixtures" / "mismatch"
+    metrics_paths = {
+        1: [str(fixtures / "baseline.json")],
+        2: [str(fixtures / "other.json")],
+        4: [str(fixtures / "baseline.json")],
+    }
+    mismatches = module.validate_invariants(metrics_paths)
+    assert mismatches
+    report = module.build_invalid_report(mismatches)
+    assert report["status"] == "invalid_comparison"
+    assert report["mismatches"]

@@ -44,6 +44,8 @@ def test_training_metrics_schema_fixture():
     assert isinstance(epoch["epoch_idx"], int)
     assert isinstance(epoch["epoch_wall_time_sec"], (int, float))
     assert isinstance(epoch["steps"], int)
+    assert isinstance(epoch["micro_steps"], int)
+    assert isinstance(epoch["optimizer_steps"], int)
     assert isinstance(epoch["tokens_processed_global"], int)
     assert isinstance(epoch["tokens_per_sec_global"], (int, float))
     assert isinstance(epoch["train_loss_avg_global"], (int, float))
@@ -54,3 +56,15 @@ def test_training_metrics_schema_fixture():
     assert isinstance(epoch["step_time_p50_sec"], (int, float))
     assert isinstance(epoch["step_time_p95_sec"], (int, float))
     assert isinstance(epoch["dataload_time_mean_sec"], (int, float))
+
+
+def test_slurm_metrics_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "training_metrics_slurm.json"
+    with fixture_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert data["schema_version"] == "2.0"
+    scheduler = data.get("scheduler")
+    assert scheduler is not None
+    assert scheduler["type"] == "slurm"
+    assert data["hardware"]["cluster"] == "Big Purple"

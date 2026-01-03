@@ -586,10 +586,15 @@ class GPT2Trainer:
                 step_time_p95 = float(np.percentile(step_samples, 95)) if step_samples else None
                 dataload_time_mean = float(np.mean(dataload_time_samples)) if dataload_time_samples else None
 
+                grad_accum = self.deepspeed_config.get("gradient_accumulation_steps", 1)
+                optimizer_steps = (global_steps + grad_accum - 1) // grad_accum if grad_accum else global_steps
+
                 epoch_metrics = {
                     "epoch_idx": epoch + 1,
                     "epoch_wall_time_sec": self.epoch_time,
                     "steps": global_steps,
+                    "micro_steps": global_steps,
+                    "optimizer_steps": int(optimizer_steps),
                     "tokens_processed_global": int(global_tokens),
                     "tokens_per_sec_global": train_throughput,
                     "train_loss_avg_global": avg_loss_epoch,
