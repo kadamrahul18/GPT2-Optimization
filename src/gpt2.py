@@ -18,6 +18,14 @@ import metrics as metrics_utils
 
 from transformers import GPT2Tokenizer
 
+def get_dist_info(args):
+    local_rank = int(os.environ.get("LOCAL_RANK", getattr(args, "local_rank", 0)))
+    if local_rank < 0:
+        local_rank = 0
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    return local_rank, rank, world_size
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -211,18 +219,32 @@ class GPT2Trainer:
         self.start_epoch = 0
         self.log_interval = args.steps_per_print
 
-        self.global_rank = 0
-        self.local_rank = 0
-        self.world_size = 1
-        if dist.is_available() and dist.is_initialized():
-            self.global_rank = dist.get_rank()
-            self.local_rank = args.local_rank
-            self.world_size = dist.get_world_size()
+        self.local_rank, self.global_rank, self.world_size = get_dist_info(args)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
             self.current_device = torch.device(f"cuda:{self.local_rank}")
-            torch.cuda.set_device(self.current_device)
         else:
-             self.current_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.current_device = torch.device("cpu")
 
+        self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
+        if self.use_deepspeed and not dist.is_initialized():
+            try:
+                import deepspeed
+                deepspeed.init_distributed()
+            except Exception as e:
+                print(f"[Rank {self.global_rank}] ERROR: DeepSpeed distributed init failed: {e}")
+                sys.exit(1)
+
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if torch.cuda.is_available():
+            current_cuda = torch.cuda.current_device()
+        else:
+            current_cuda = None
+        print(
+            f"[Rank {self.global_rank}] Startup: pid={os.getpid()} "
+            f"rank={self.global_rank} local_rank={self.local_rank} world_size={self.world_size} "
+            f"CUDA_VISIBLE_DEVICES={cuda_visible} torch.cuda.current_device={current_cuda}"
+        )
 
         def rank_print(*print_args, **kwargs):
             if self.global_rank == 0:
@@ -264,7 +286,6 @@ class GPT2Trainer:
             self.rank_print(f"ERROR: Failed to load datasets: {e}")
             sys.exit(1)
 
-        self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
         launcher = "deepspeed" if self.use_deepspeed else "baseline"
         self.rank_print(f"DeepSpeed enabled: {self.use_deepspeed}, launcher: {launcher}")
 
@@ -293,8 +314,16 @@ class GPT2Trainer:
         self.micro_batch_size = self.deepspeed_config.get(
             "train_micro_batch_size_per_gpu", self.args.train_micro_batch_size_per_gpu
         )
-        self.use_amp = bool(self.deepspeed_config.get("fp16", {}).get("enabled")) and torch.cuda.is_available()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.use_amp = (
+            bool(self.deepspeed_config.get("fp16", {}).get("enabled"))
+            and torch.cuda.is_available()
+            and not self.use_deepspeed
+        )
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if self.use_amp else None
+        if self.deepspeed_config.get("fp16", {}).get("enabled"):
+            self.precision_mode = "fp16_deepspeed" if self.use_deepspeed else "fp16_torch_amp"
+        else:
+            self.precision_mode = "fp32"
 
         if self.use_deepspeed:
             self.rank_print("Initializing DeepSpeed engine...")
@@ -364,6 +393,7 @@ class GPT2Trainer:
             world_size=self.world_size,
             repo_root=repo_root,
             ds_config_path=args.deepspeed_config,
+            precision_override=self.precision_mode,
         )
 
         if args.resume:

@@ -122,7 +122,16 @@ def write_json_atomic(path, payload):
     os.replace(tmp_path, path)
 
 
-def build_initial_metrics(args, ds_config, train_dataset, val_dataset, world_size, repo_root, ds_config_path):
+def build_initial_metrics(
+    args,
+    ds_config,
+    train_dataset,
+    val_dataset,
+    world_size,
+    repo_root,
+    ds_config_path,
+    precision_override=None,
+):
     host_info = get_host_info()
     library_versions = get_library_versions()
     hardware = get_hardware_info(world_size)
@@ -140,7 +149,10 @@ def build_initial_metrics(args, ds_config, train_dataset, val_dataset, world_siz
     global_batch = micro_batch * grad_accum * world_size
     optimizer = ds_config.get("optimizer", {})
     optimizer_lr = optimizer.get("params", {}).get("lr")
-    precision = "fp16" if ds_config.get("fp16", {}).get("enabled") else "fp32"
+    if precision_override:
+        precision = precision_override
+    else:
+        precision = "fp16" if ds_config.get("fp16", {}).get("enabled") else "fp32"
     zero_stage = ds_config.get("zero_optimization", {}).get("stage")
 
     train_name = os.path.basename(args.train_data_path)
