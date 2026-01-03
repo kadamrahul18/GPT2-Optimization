@@ -8,7 +8,6 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from tqdm import tqdm
 import argparse
-import deepspeed
 import json
 import time
 import torch.profiler
@@ -265,6 +264,9 @@ class GPT2Trainer:
             self.rank_print(f"ERROR: Failed to load datasets: {e}")
             sys.exit(1)
 
+        self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
+        launcher = "deepspeed" if self.use_deepspeed else "baseline"
+        self.rank_print(f"DeepSpeed enabled: {self.use_deepspeed}, launcher: {launcher}")
 
         try:
             with open(args.deepspeed_config, 'r') as f:
@@ -287,23 +289,51 @@ class GPT2Trainer:
                 % (self.args.seq_length, micro_batch, ds_grad_accum, global_batch, visible_gpus)
             )
 
-        self.rank_print("Initializing DeepSpeed engine...")
-        try:
-             self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
-                 model=self.model,
-                 model_parameters=self.model.parameters(),
-                 training_data=self.train_dataset,
-                 config=deepspeed_config
-             )
-             self.rank_print("DeepSpeed Engine Initialized Successfully.")
-             self.rank_print(f"Using device: {self.model_engine.local_rank} (mapped to {self.current_device})")
+        self.grad_accum_steps = self.deepspeed_config.get("gradient_accumulation_steps", 1)
+        self.micro_batch_size = self.deepspeed_config.get(
+            "train_micro_batch_size_per_gpu", self.args.train_micro_batch_size_per_gpu
+        )
+        self.use_amp = bool(self.deepspeed_config.get("fp16", {}).get("enabled")) and torch.cuda.is_available()
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
-
-        except Exception as e:
-             self.rank_print(f"ERROR: DeepSpeed Initialization Failed: {e}")
-             if hasattr(e, 'extra_info'):
-                 self.rank_print(f"Extra Info: {e.extra_info}")
-             sys.exit(1)
+        if self.use_deepspeed:
+            self.rank_print("Initializing DeepSpeed engine...")
+            try:
+                 import deepspeed
+                 self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
+                     model=self.model,
+                     model_parameters=self.model.parameters(),
+                     training_data=self.train_dataset,
+                     config=deepspeed_config
+                 )
+                 self.rank_print("DeepSpeed Engine Initialized Successfully.")
+                 self.rank_print(f"Using device: {self.model_engine.local_rank} (mapped to {self.current_device})")
+            except Exception as e:
+                 self.rank_print(f"ERROR: DeepSpeed Initialization Failed: {e}")
+                 if hasattr(e, 'extra_info'):
+                     self.rank_print(f"Extra Info: {e.extra_info}")
+                 sys.exit(1)
+        else:
+            self.model_engine = self.model.to(self.current_device)
+            optimizer_cfg = self.deepspeed_config.get("optimizer", {})
+            optimizer_params = optimizer_cfg.get("params", {})
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=optimizer_params.get("lr", 1e-4),
+                betas=tuple(optimizer_params.get("betas", (0.9, 0.999))),
+                eps=optimizer_params.get("eps", 1e-8),
+                weight_decay=optimizer_params.get("weight_decay", 0.01),
+            )
+            self.scheduler = None
+            self.train_dataloader = DataLoader(
+                self.train_dataset,
+                batch_size=self.micro_batch_size,
+                shuffle=True,
+                num_workers=2,
+                pin_memory=True,
+                drop_last=True,
+            )
+            self.rank_print("Initialized baseline optimizer and dataloader.")
 
         if dist.is_available() and dist.is_initialized():
              self.rank_print("Waiting at barrier after DeepSpeed initialization...")
@@ -314,7 +344,7 @@ class GPT2Trainer:
             val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.world_size, rank=self.global_rank, shuffle=False)
             self.val_dataloader = DataLoader(
                 self.val_dataset,
-                batch_size=args.train_micro_batch_size_per_gpu,
+                batch_size=self.micro_batch_size,
                 sampler=val_sampler,
                 num_workers=2,
                 pin_memory=True,
@@ -384,6 +414,8 @@ class GPT2Trainer:
                  self.epoch_start_time = time.time()
 
             self.model_engine.train()
+            if not self.use_deepspeed:
+                self.optimizer.zero_grad(set_to_none=True)
 
             if hasattr(self.train_dataloader, 'sampler') and hasattr(self.train_dataloader.sampler, 'set_epoch'):
                  self.train_dataloader.sampler.set_epoch(epoch)
@@ -411,7 +443,8 @@ class GPT2Trainer:
 
 
             train_iter = iter(self.train_dataloader)
-            for step in range(len(self.train_dataloader)):
+            total_steps_in_epoch = len(self.train_dataloader)
+            for step in range(total_steps_in_epoch):
                  if dist.is_available() and dist.is_initialized():
                       if step % 50 == 0:
                            print(f"[Rank {self.global_rank}] Waiting at barrier: Start of Step {step}, Epoch {epoch+1}")
@@ -443,7 +476,11 @@ class GPT2Trainer:
                            start_event.record()
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Starting forward pass, Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
-                      outputs = self.model_engine(*inputs)
+                      if self.use_deepspeed:
+                           outputs = self.model_engine(*inputs)
+                      else:
+                           with torch.cuda.amp.autocast(enabled=self.use_amp):
+                                outputs = self.model_engine(*inputs)
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Completed forward pass, Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
                  except Exception as e:
@@ -473,13 +510,35 @@ class GPT2Trainer:
                  try:
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Starting backward pass, Step {step}, Epoch {epoch+1}")
-                      self.model_engine.backward(loss)
+                      if self.use_deepspeed:
+                           self.model_engine.backward(loss)
+                      else:
+                           loss_to_backprop = loss / max(1, self.grad_accum_steps)
+                           if self.use_amp:
+                                self.scaler.scale(loss_to_backprop).backward()
+                           else:
+                                loss_to_backprop.backward()
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Completed backward pass, Step {step}, Epoch {epoch+1}")
 
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Starting optimizer step, Step {step}, Epoch {epoch+1}")
-                      self.model_engine.step()
+                      if self.use_deepspeed:
+                           self.model_engine.step()
+                      else:
+                           should_step = ((step + 1) % max(1, self.grad_accum_steps) == 0) or (step + 1 == total_steps_in_epoch)
+                           if should_step:
+                                grad_clip = self.deepspeed_config.get("gradient_clipping")
+                                if grad_clip:
+                                     if self.use_amp:
+                                          self.scaler.unscale_(self.optimizer)
+                                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                                if self.use_amp:
+                                     self.scaler.step(self.optimizer)
+                                     self.scaler.update()
+                                else:
+                                     self.optimizer.step()
+                                self.optimizer.zero_grad(set_to_none=True)
                       if step % 50 == 0 or step < 5:
                            print(f"[Rank {self.global_rank}]: Completed optimizer step, Step {step}, Epoch {epoch+1}")
                       if end_event is not None:
@@ -634,8 +693,14 @@ class GPT2Trainer:
                 try:
                      tag = f"epoch-{epoch+1}"
                      self.rank_print(f"Attempting to save checkpoint with tag '{tag}' to {self.args.checkpoint_path}...")
-                     self.model_engine.save_16bit_model(self.args.checkpoint_path, tag)
-                     self.rank_print(f"Checkpoint saved successfully with tag '{tag}'")
+                     if self.use_deepspeed:
+                          self.model_engine.save_16bit_model(self.args.checkpoint_path, tag)
+                          self.rank_print(f"Checkpoint saved successfully with tag '{tag}'")
+                     else:
+                          os.makedirs(self.args.checkpoint_path, exist_ok=True)
+                          ckpt_path = os.path.join(self.args.checkpoint_path, f"{tag}.pt")
+                          torch.save(self.model.state_dict(), ckpt_path)
+                          self.rank_print(f"Checkpoint saved successfully to {ckpt_path}")
                 except Exception as ckpt_e:
                      self.rank_print(f"ERROR: Failed to save checkpoint for epoch {epoch+1}: {ckpt_e}")
 
@@ -706,7 +771,11 @@ class GPT2Trainer:
                  try:
                       if step % 20 == 0 or step < 3:
                           print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
-                      outputs = self.model_engine(*inputs)
+                      if self.use_deepspeed:
+                           outputs = self.model_engine(*inputs)
+                      else:
+                           with torch.cuda.amp.autocast(enabled=self.use_amp):
+                                outputs = self.model_engine(*inputs)
                       if step % 20 == 0 or step < 3:
                           print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
 
