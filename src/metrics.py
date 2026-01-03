@@ -134,6 +134,7 @@ def build_initial_metrics(
     micro_batch_size_per_gpu=None,
     grad_accum_steps=None,
     global_batch_size=None,
+    quiet_nccl_monitor=False,
 ):
     host_info = get_host_info()
     library_versions = get_library_versions()
@@ -223,6 +224,10 @@ def build_initial_metrics(
             "total_wall_time_sec": None,
             "best_val_loss": None,
             "mean_tokens_per_sec_global": None,
+        },
+        "shutdown": {
+            "destroy_process_group_called": False,
+            "quiet_nccl_monitor": bool(quiet_nccl_monitor),
         },
     }
 

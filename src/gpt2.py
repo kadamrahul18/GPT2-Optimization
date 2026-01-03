@@ -57,6 +57,18 @@ def resolve_batch_config(args, ds_config, visible_gpus):
 
     return micro_batch, grad_accum, global_batch
 
+
+def graceful_distributed_shutdown():
+    try:
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
+            time.sleep(0.5)
+        return True
+    except Exception as e:
+        print(f"[Rank {os.environ.get('RANK', '0')}] Warning: failed to destroy process group: {e}")
+        return False
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -260,6 +272,10 @@ class GPT2Trainer:
         self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
         if self.use_deepspeed and not dist.is_initialized():
             try:
+                if self.args.quiet_nccl_monitor:
+                    os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
+                    if self.global_rank == 0:
+                        print("[Rank 0] NCCL monitoring disabled via TORCH_NCCL_ENABLE_MONITORING=0")
                 import deepspeed
                 deepspeed.init_distributed()
             except Exception as e:
@@ -438,6 +454,7 @@ class GPT2Trainer:
             micro_batch_size_per_gpu=self.micro_batch_size,
             grad_accum_steps=self.grad_accum_steps,
             global_batch_size=self.global_batch_size,
+            quiet_nccl_monitor=self.args.quiet_nccl_monitor,
         )
 
         if args.resume:
@@ -813,9 +830,17 @@ class GPT2Trainer:
             self.metrics["summary"]["best_val_loss"] = best_val_loss
             self.metrics["summary"]["mean_tokens_per_sec_global"] = mean_tokens_per_sec
 
+            if dist.is_available() and dist.is_initialized():
+                 self.rank_print("Waiting at barrier before metrics save...")
+                 dist.barrier()
+
             metrics_file_path = os.path.join(self.args.checkpoint_path, "training_metrics.json")
             self.save_metrics(self.metrics, metrics_file_path)
             self.rank_print(f"Final metrics saved to {metrics_file_path}")
+
+            if dist.is_available() and dist.is_initialized():
+                 self.rank_print("Waiting at barrier after metrics save...")
+                 dist.barrier()
 
         if dist.is_available() and dist.is_initialized():
             self.rank_print("Waiting at final barrier...")
@@ -1132,6 +1157,7 @@ def main():
     parser.add_argument('--grad_accum_steps', type=int, default=None, help='Override gradient accumulation steps')
     parser.add_argument('--global_batch_size', type=int, default=None, help='Override global batch size')
     parser.add_argument('--enforce_global_batch_size', type=int, default=None, help='Fail if computed global batch size differs')
+    parser.add_argument('--quiet_nccl_monitor', action='store_true', help='Disable NCCL monitoring in torch.distributed')
     # parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='Gradient accumulation steps (overridden by deepspeed config)')
     # parser.add_argument('--learning_rate', type=float, default=1e-5, help='Learning rate (can be overridden by deepspeed config scheduler)')
     # parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer')
@@ -1156,6 +1182,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.quiet_nccl_monitor:
+         os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
+
 
     if args.local_rank == -1:
          print("Warning: local_rank not set by launcher, running in non-distributed mode.")
@@ -1170,6 +1199,13 @@ def main():
     if trainer.global_rank == 0:
         trainer.summarize_results()
         trainer.print_kernel_comparison()
+
+    shutdown_called = graceful_distributed_shutdown()
+    if trainer.global_rank == 0:
+        trainer.metrics["shutdown"]["destroy_process_group_called"] = shutdown_called
+        trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
+        metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
+        trainer.save_metrics(trainer.metrics, metrics_file_path)
 
 if __name__ == '__main__':
     main()
