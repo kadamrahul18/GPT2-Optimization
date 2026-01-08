@@ -1,8 +1,8 @@
-# GPT-2 Training Benchmarks (Training Only)
+# GPT-2 Training Benchmarks
 
 Train GPT-2 with a baseline single process or multi-GPU DeepSpeed on a single node. Each run writes `training_metrics.json` (schema v2.0) and `RUN_COMPLETE.txt`.
 
-## Key Results (Big Purple V100, Fixed-Work)
+## Key Results (Big Purple V100)
 
 Artifacts:
 - `benchmarks/bigpurple_v100_2026-01-08/1gpu/training_metrics.json`
