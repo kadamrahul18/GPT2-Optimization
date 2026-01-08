@@ -81,5 +81,10 @@
     "total_wall_time_sec": 3.5,
     "mean_tokens_per_sec_global": 320.0,
     "best_val_loss": 2.1
+  },
+  "completion": {
+    "run_complete_file": "RUN_COMPLETE.txt",
+    "printed_marker": true,
+    "timestamp_utc": "2024-01-01T00:00:00Z"
   }
 }

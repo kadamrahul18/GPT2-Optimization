@@ -7,16 +7,16 @@ import seaborn as sns
 import os
 
 def load_metrics(file_path):
-    """Loads metrics from a JSON file."""
+    """Loads training metrics from a JSON file."""
     try:
         with open(file_path, 'r') as f:
             data = json.load(f)
-        
-        # Extract the last value for metrics that are lists
+
+        epochs = data.get("epochs", [])
+        last_epoch = epochs[-1] if epochs else {}
         metrics = {
-            "Training Time (s)": data.get("train_time_per_epoch", [0])[-1],
-            "Inference Latency (s)": data.get("inference_latency", 0),
-            "Inference Throughput (tokens/s)": data.get("inference_throughput", 0)
+            "Training Time (s)": last_epoch.get("epoch_wall_time_sec", 0),
+            "Tokens/sec": last_epoch.get("tokens_per_sec_global", 0),
         }
         return metrics
     except (FileNotFoundError, json.JSONDecodeError, IndexError) as e:
@@ -56,24 +56,17 @@ def generate_plots(baseline_metrics, optimized_metrics):
     print(f"Saved training time chart to {training_chart_path}")
     plt.close()
 
-    # --- Chart 2: Inference Performance ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    
-    ax1.bar(labels, [baseline_metrics["Inference Latency (s)"], optimized_metrics["Inference Latency (s)"]], color=['#4c72b0', '#55a868'])
-    ax1.set_ylabel('Latency (seconds)')
-    ax1.set_title('Inference Latency Improvement', fontsize=14, fontweight='bold')
-    ax1.bar_label(ax1.containers[0], fmt='%.2f s')
-    
-    ax2.bar(labels, [baseline_metrics["Inference Throughput (tokens/s)"], optimized_metrics["Inference Throughput (tokens/s)"]], color=['#4c72b0', '#55a868'])
-    ax2.set_ylabel('Throughput (tokens/second)')
-    ax2.set_title('Inference Throughput Boost', fontsize=14, fontweight='bold')
-    ax2.bar_label(ax2.containers[0], fmt='%.1f tok/s')
-    
-    fig.suptitle('Inference Performance Comparison', fontsize=18, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    inference_chart_path = os.path.join(output_dir, 'inference_performance_comparison.png')
-    plt.savefig(inference_chart_path)
-    print(f"Saved inference performance chart to {inference_chart_path}")
+    # --- Chart 2: Training Throughput ---
+    fig, ax = plt.subplots(figsize=(8, 6))
+    throughput = [baseline_metrics["Tokens/sec"], optimized_metrics["Tokens/sec"]]
+    bars = ax.bar(labels, throughput, color=['#4c72b0', '#55a868'])
+    ax.set_ylabel('Tokens/sec')
+    ax.set_title('Training Throughput per Epoch', fontsize=16, fontweight='bold')
+    ax.bar_label(bars, fmt='%.0f tok/s')
+    plt.tight_layout()
+    throughput_chart_path = os.path.join(output_dir, 'training_throughput_comparison.png')
+    plt.savefig(throughput_chart_path)
+    print(f"Saved training throughput chart to {throughput_chart_path}")
     plt.close()
 
 if __name__ == '__main__':

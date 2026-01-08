@@ -10,6 +10,7 @@ from tqdm import tqdm
 import argparse
 import json
 import time
+from datetime import datetime, timezone
 import torch.profiler
 import copy
 import torch.distributed as dist
@@ -832,23 +833,6 @@ class GPT2Trainer:
             self.metrics["summary"]["best_val_loss"] = best_val_loss
             self.metrics["summary"]["mean_tokens_per_sec_global"] = mean_tokens_per_sec
 
-            if dist.is_available() and dist.is_initialized():
-                 self.rank_print("Waiting at barrier before metrics save...")
-                 dist.barrier()
-
-            metrics_file_path = os.path.join(self.args.checkpoint_path, "training_metrics.json")
-            self.save_metrics(self.metrics, metrics_file_path)
-            self.rank_print(f"Final metrics saved to {metrics_file_path}")
-
-            if dist.is_available() and dist.is_initialized():
-                 self.rank_print("Waiting at barrier after metrics save...")
-                 dist.barrier()
-
-        if dist.is_available() and dist.is_initialized():
-            self.rank_print("Waiting at final barrier...")
-            dist.barrier()
-            self.rank_print("Passed final barrier. Training finished.")
-
 
     def validate(self, epoch):
         self.rank_print(f"Starting validation for Epoch {epoch+1}")
@@ -992,154 +976,6 @@ class GPT2Trainer:
                  self.rank_print(f"ERROR: Failed to save metrics to {file_path}: {e}")
 
 
-    def load_metrics(self, file_path):
-        if self.global_rank == 0:
-            self.rank_print(f"Loading metrics from {file_path}")
-            try:
-                if os.path.exists(file_path):
-                    with open(file_path, 'r') as f:
-                        metrics = json.load(f)
-                    return metrics
-                else:
-                    self.rank_print(f"Warning: Metrics file not found at {file_path}")
-                    return {}
-            except Exception as e:
-                 self.rank_print(f"ERROR: Failed to load metrics from {file_path}: {e}")
-                 return {}
-        else:
-             return {}
-
-
-    def summarize_results(self):
-        if self.global_rank != 0:
-            return
-
-        if self.metrics.get("schema_version") != "2.0":
-            self.rank_print("Skipping summary: metrics schema not supported for comparison.")
-            return
-
-        self.rank_print("Summarizing results (comparison assumes baseline metrics are available).")
-        optimized_metrics_path = os.path.join(self.args.checkpoint_path, "training_metrics.json")
-        self.optimized_metrics = self.load_metrics(optimized_metrics_path)
-
-        baseline_metrics_path = os.path.join(os.path.dirname(self.args.checkpoint_path), "baseline", "baseline_metrics.json")
-        self.baseline_metrics = self.load_metrics(baseline_metrics_path)
-
-        if not self.baseline_metrics or not self.optimized_metrics:
-             self.rank_print("Cannot summarize results: Baseline or Optimized metrics missing.")
-             return
-
-        def get_last_or_default(metric_dict, key, default_value="N/A"):
-            val = metric_dict.get(key, [])
-            if isinstance(val, list):
-                 return val[-1] if val else default_value
-            else:
-                 return val if val is not None else default_value
-
-        def calculate_improvement(baseline, optimized, higher_is_better=False):
-            if baseline == "N/A" or optimized == "N/A": return "N/A"
-            try:
-                baseline = float(baseline); optimized = float(optimized)
-            except (ValueError, TypeError): return "N/A"
-            if higher_is_better:
-                if optimized == 0: return "N/A" if baseline == 0 else "Inf improvement"
-                return ((optimized - baseline) / baseline) * 100 if baseline != 0 else "Inf improvement"
-            else:
-                if baseline == 0: return "N/A" if optimized == 0 else "Inf improvement"
-                return ((baseline - optimized) / baseline) * 100
-
-        def format_improvement(improvement):
-            if isinstance(improvement, (int, float)): return f"{improvement:.2f}%"
-            else: return improvement
-
-        baseline_train_time = get_last_or_default(self.baseline_metrics.get("summary", {}), 'total_wall_time_sec')
-        optimized_train_time = get_last_or_default(self.optimized_metrics.get("summary", {}), 'total_wall_time_sec')
-        train_time_reduction = calculate_improvement(baseline_train_time, optimized_train_time, higher_is_better=False)
-
-        baseline_max_memory = "N/A"
-        optimized_max_memory = "N/A"
-        memory_reduction = "N/A"
-
-
-        baseline_val_loss = get_last_or_default(self.baseline_metrics.get("summary", {}), 'best_val_loss')
-        optimized_val_loss = get_last_or_default(self.optimized_metrics.get("summary", {}), 'best_val_loss')
-        loss_improvement = calculate_improvement(baseline_val_loss, optimized_val_loss, higher_is_better=False)
-
-
-        baseline_train_throughput = get_last_or_default(self.baseline_metrics.get("summary", {}), 'mean_tokens_per_sec_global')
-        optimized_train_throughput = get_last_or_default(self.optimized_metrics.get("summary", {}), 'mean_tokens_per_sec_global')
-        train_throughput_improvement = calculate_improvement(baseline_train_throughput, optimized_train_throughput, higher_is_better=True)
-
-
-        print("\n===== Summary of Main Results =====")
-        print("| Metric                          | Baseline     | Optimized    | Improvement       |")
-        print("|---------------------------------|--------------|--------------|-------------------|")
-        print(f"| Train Time/Epoch (s)          | {baseline_train_time: <12} | {optimized_train_time: <12} | {format_improvement(train_time_reduction): <17} |")
-        print(f"| Validation Loss                 | {baseline_val_loss: <12} | {optimized_val_loss: <12} | {format_improvement(loss_improvement): <17} |")
-        print(f"| Train Throughput (tokens/s)   | {baseline_train_throughput: <12} | {optimized_train_throughput: <12} | {format_improvement(train_throughput_improvement): <17} |")
-        print(f"| Max Memory Usage (MB)         | {baseline_max_memory: <12} | {optimized_max_memory: <12} | {format_improvement(memory_reduction): <17} |")
-
-
-    def print_kernel_comparison(self):
-        if self.global_rank != 0:
-             return
-        self.rank_print("Attempting kernel-level comparison...")
-        import glob
-
-        baseline_log_dir = os.path.join(os.path.dirname(self.args.checkpoint_path), "baseline", "baseline_profiler_logs")
-        optimized_log_dir = os.path.join(self.args.checkpoint_path, "profiler_logs")
-
-        baseline_trace_files = glob.glob(os.path.join(baseline_log_dir, "*.pt.trace.json"))
-        optimized_trace_files = glob.glob(os.path.join(optimized_log_dir, "*.pt.trace.json"))
-
-        if not baseline_trace_files:
-            print("Warning: No baseline trace files found. Skipping kernel-level comparison.")
-            return
-        if not optimized_trace_files:
-            print("Warning: No optimized trace files found. Skipping kernel-level comparison.")
-            return
-
-        baseline_trace_file = baseline_trace_files[0]
-        optimized_trace_file = optimized_trace_files[0]
-
-        def process_trace(trace_file):
-            try:
-                with open(trace_file, 'r') as f: data = json.load(f)
-            except Exception as e:
-                print(f"Error reading trace file {trace_file}: {e}")
-                return {}
-
-            kernel_times = {}
-            for event in data.get('traceEvents', []):
-                if event.get('cat') == 'kernel':
-                    kernel_name = event.get('name', 'UnknownKernel')
-                    duration = event.get('dur', 0) / 1000.0
-                    kernel_times[kernel_name] = kernel_times.get(kernel_name, 0) + duration
-            sorted_kernels = sorted(kernel_times.items(), key=lambda item: item[1], reverse=True)[:3]
-            return dict(sorted_kernels)
-
-
-        baseline_kernels = process_trace(baseline_trace_file)
-        optimized_kernels = process_trace(optimized_trace_file)
-
-        if not baseline_kernels or not optimized_kernels:
-             print("Could not process kernel data from trace files.")
-             return
-
-        all_kernels = set(baseline_kernels.keys()).union(optimized_kernels.keys())
-
-        print("===== Top 3 Kernel-Level Analysis =====")
-        print("| Kernel Name                | Baseline Time (ms) | Optimized Time (ms) |")
-        print("|----------------------------|--------------------|---------------------|")
-        for kernel_name in all_kernels:
-            baseline_time = baseline_kernels.get(kernel_name, 0)
-            optimized_time = optimized_kernels.get(kernel_name, 0)
-            display_name = (kernel_name[:25] + '...') if len(kernel_name) > 28 else kernel_name
-            print(f"| {display_name:<26} | {baseline_time:18.2f} | {optimized_time:19.2f} |")
-
-        print("\nNote: Shows total time for top kernels found in either trace. Lower time in optimized is better.")
-
-
 def main():
     parser = argparse.ArgumentParser(description='Train GPT-2 Model with DeepSpeed')
 
@@ -1198,16 +1034,41 @@ def main():
 
     trainer.train()
 
-    if trainer.global_rank == 0:
-        trainer.summarize_results()
-        trainer.print_kernel_comparison()
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
-    shutdown_called = graceful_distributed_shutdown()
     if trainer.global_rank == 0:
-        trainer.metrics["shutdown"]["destroy_process_group_called"] = shutdown_called
+        timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        trainer.metrics["completion"] = {
+            "run_complete_file": "RUN_COMPLETE.txt",
+            "printed_marker": True,
+            "timestamp_utc": timestamp_utc,
+        }
+        trainer.metrics["shutdown"]["destroy_process_group_called"] = dist.is_available() and dist.is_initialized()
         trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
+
         metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
         trainer.save_metrics(trainer.metrics, metrics_file_path)
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+    shutdown_called = graceful_distributed_shutdown()
+
+    if trainer.global_rank == 0:
+        tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
+        total_wall_time = trainer.metrics.get("summary", {}).get("total_wall_time_sec")
+        run_complete_line = (
+            f"[Rank 0] RUN_COMPLETE checkpoint_path={args.checkpoint_path} "
+            f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
+            f"total_wall_time_sec={total_wall_time}"
+        )
+        print(run_complete_line, flush=True)
+        run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
+        os.makedirs(args.checkpoint_path, exist_ok=True)
+        with open(run_complete_path, "w", encoding="utf-8") as f:
+            f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
+    print(f"[Rank {trainer.global_rank}] EXITING cleanly", flush=True)
 
 if __name__ == '__main__':
     main()

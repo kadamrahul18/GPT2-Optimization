@@ -109,8 +109,8 @@ python scripts/run_scaling_benchmarks.py \
 ### 6. Run the Scaling Benchmarks (Slurm)
 See `docs/HPC_SLURM.md` for an sbatch template and usage on Big Purple.
 
-### 7. Generate the Chart
-This command consumes the output of the manual baseline + optimized runs to create the final visual.
+### 7. Generate the Charts
+This command consumes the output of the manual baseline + optimized runs to create training-only visuals.
 ```bash
 pip install matplotlib seaborn
 python scripts/3_generate_charts.py \
@@ -120,7 +120,8 @@ python scripts/3_generate_charts.py \
 
 ## Artifacts
 
-- `training_metrics.json` includes a versioned training-only schema with per-epoch `tokens_per_sec_global`, `epoch_wall_time_sec`, and rank-0 CUDA memory stats.
+- `training_metrics.json` includes a versioned training-only schema with per-epoch `tokens_per_sec_global`, `epoch_wall_time_sec`, rank-0 CUDA memory stats, and completion metadata.
+- `RUN_COMPLETE.txt` is written when a run finishes so automation can detect completion.
 - `scaling_report.json` aggregates per-run throughput and epoch time. It computes:
   - `speedup_vs_1gpu = throughput_N / throughput_1gpu` (or inverse epoch time if throughput is missing)
   - `scaling_efficiency = speedup_vs_1gpu / N`

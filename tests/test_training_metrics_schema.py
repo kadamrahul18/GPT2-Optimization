@@ -56,6 +56,11 @@ def test_training_metrics_schema_fixture():
     assert isinstance(epoch["step_time_p50_sec"], (int, float))
     assert isinstance(epoch["step_time_p95_sec"], (int, float))
     assert isinstance(epoch["dataload_time_mean_sec"], (int, float))
+    completion = data.get("completion")
+    assert completion is not None
+    assert completion["run_complete_file"] == "RUN_COMPLETE.txt"
+    assert isinstance(completion["printed_marker"], bool)
+    assert isinstance(completion["timestamp_utc"], str)
 
 
 def test_slurm_metrics_fixture():
@@ -68,3 +73,9 @@ def test_slurm_metrics_fixture():
     assert scheduler is not None
     assert scheduler["type"] == "slurm"
     assert data["hardware"]["cluster"] == "Big Purple"
+
+
+def test_run_complete_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "RUN_COMPLETE.txt"
+    content = fixture_path.read_text(encoding="utf-8")
+    assert "RUN_COMPLETE" in content

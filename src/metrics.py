@@ -229,6 +229,11 @@ def build_initial_metrics(
             "destroy_process_group_called": False,
             "quiet_nccl_monitor": bool(quiet_nccl_monitor),
         },
+        "completion": {
+            "run_complete_file": "RUN_COMPLETE.txt",
+            "printed_marker": False,
+            "timestamp_utc": None,
+        },
     }
 
     slurm_context = detect_slurm_context()
