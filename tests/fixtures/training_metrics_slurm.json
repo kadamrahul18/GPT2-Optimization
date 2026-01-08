@@ -47,7 +47,8 @@
     "dataset_subset_sizes": {
       "train": 100,
       "val": 20
-    }
+    },
+    "deepspeed_enabled": true
   },
   "deepspeed_config": {
     "path": "src/deepspeed_config.json",

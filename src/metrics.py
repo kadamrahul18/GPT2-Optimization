@@ -135,6 +135,7 @@ def build_initial_metrics(
     grad_accum_steps=None,
     global_batch_size=None,
     quiet_nccl_monitor=False,
+    deepspeed_enabled=False,
 ):
     host_info = get_host_info()
     library_versions = get_library_versions()
@@ -167,7 +168,7 @@ def build_initial_metrics(
         precision = precision_override
     else:
         precision = "fp16" if ds_config.get("fp16", {}).get("enabled") else "fp32"
-    zero_stage = ds_config.get("zero_optimization", {}).get("stage")
+    zero_stage = ds_config.get("zero_optimization", {}).get("stage") if deepspeed_enabled else 0
 
     train_name = os.path.basename(args.train_data_path)
     dataset_name = os.path.splitext(train_name)[0]
@@ -200,6 +201,7 @@ def build_initial_metrics(
             "lr": optimizer_lr,
             "optimizer": optimizer.get("type"),
             "precision": precision,
+            "deepspeed_enabled": bool(deepspeed_enabled),
             "zero_stage": zero_stage,
             "dataset_name": dataset_name,
             "dataset_subset_sizes": {
@@ -211,7 +213,6 @@ def build_initial_metrics(
             "path": ds_config_path,
             "sha256": sha256_file(ds_config_path),
             "selected": {
-                "zero_stage": zero_stage,
                 "fp16_enabled": ds_config.get("fp16", {}).get("enabled"),
                 "wall_clock_breakdown": ds_config.get("wall_clock_breakdown"),
             },
@@ -235,6 +236,9 @@ def build_initial_metrics(
             "timestamp_utc": None,
         },
     }
+
+    if deepspeed_enabled:
+        metrics["deepspeed_config"]["selected"]["zero_stage"] = zero_stage
 
     slurm_context = detect_slurm_context()
     if slurm_context:

@@ -31,18 +31,18 @@
     "lr": 0.0001,
     "optimizer": "AdamW",
     "precision": "fp16_torch_amp",
-    "zero_stage": 1,
+    "zero_stage": 0,
     "dataset_name": "train_small",
     "dataset_subset_sizes": {
       "train": 100,
       "val": 20
-    }
+    },
+    "deepspeed_enabled": false
   },
   "deepspeed_config": {
     "path": "src/deepspeed_config.json",
     "sha256": "deadbeef",
     "selected": {
-      "zero_stage": 1,
       "fp16_enabled": true,
       "wall_clock_breakdown": true
     }

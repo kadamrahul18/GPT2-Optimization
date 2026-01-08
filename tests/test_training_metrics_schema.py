@@ -36,6 +36,8 @@ def test_training_metrics_schema_fixture():
     assert isinstance(training_config["lr"], float)
     assert isinstance(training_config["optimizer"], str)
     assert training_config["precision"] in {"fp16_deepspeed", "fp16_torch_amp", "fp32"}
+    assert isinstance(training_config["deepspeed_enabled"], bool)
+    assert isinstance(training_config["zero_stage"], int)
 
     epochs = data["epochs"]
     assert isinstance(epochs, list)

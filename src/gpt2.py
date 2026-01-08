@@ -460,6 +460,7 @@ class GPT2Trainer:
             grad_accum_steps=self.grad_accum_steps,
             global_batch_size=self.global_batch_size,
             quiet_nccl_monitor=self.args.quiet_nccl_monitor,
+            deepspeed_enabled=self.use_deepspeed,
         )
 
         if args.resume:
