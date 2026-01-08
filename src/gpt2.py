@@ -62,12 +62,14 @@ def resolve_batch_config(args, ds_config, visible_gpus):
 def graceful_distributed_shutdown():
     try:
         if dist.is_available() and dist.is_initialized():
-            dist.barrier()
             dist.destroy_process_group()
-            time.sleep(0.5)
+            time.sleep(0.2)
         return True
     except Exception as e:
-        print(f"[Rank {os.environ.get('RANK', '0')}] Warning: failed to destroy process group: {e}")
+        print(
+            f"[Rank {os.environ.get('RANK', '0')}] Warning: failed to destroy process group: {e}",
+            flush=True,
+        )
         return False
 
 class TokenEmbedding(nn.Module):
@@ -1049,11 +1051,7 @@ def main():
 
         metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
         trainer.save_metrics(trainer.metrics, metrics_file_path)
-
-    if dist.is_available() and dist.is_initialized():
-        dist.barrier()
-
-    shutdown_called = graceful_distributed_shutdown()
+        print(f"[Rank 0] METRICS_WRITE_DONE path={metrics_file_path}", flush=True)
 
     if trainer.global_rank == 0:
         tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
@@ -1063,11 +1061,13 @@ def main():
             f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
             f"total_wall_time_sec={total_wall_time}"
         )
-        print(run_complete_line, flush=True)
         run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
         os.makedirs(args.checkpoint_path, exist_ok=True)
         with open(run_complete_path, "w", encoding="utf-8") as f:
             f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
+        print(run_complete_line, flush=True)
+
+    graceful_distributed_shutdown()
     print(f"[Rank {trainer.global_rank}] EXITING cleanly", flush=True)
 
 if __name__ == '__main__':
