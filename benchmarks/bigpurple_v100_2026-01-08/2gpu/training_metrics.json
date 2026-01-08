@@ -1,0 +1,99 @@
+{
+  "schema_version": "2.0",
+  "run_id": "20260108T194215Z-bd74a9a8",
+  "timestamp_utc": "2026-01-08T19:42:15Z",
+  "git_commit": "bfcef35ad77bf757c0b05c0f04626233572744d5",
+  "command_line": "src/gpt2.py --local_rank=0 --run_type optimized --train_data_path /gpfs/scratch/rsk8552/GPT2-Optimization/train_small.bin --val_data_path /gpfs/scratch/rsk8552/GPT2-Optimization/val_small.bin --checkpoint_path /gpfs/scratch/rsk8552/GPT2-Optimization/checkpoint/runs_20260108_182833_job17186821/2gpu_deepspeed --epochs 1 --seq_length 512 --deepspeed_config src/deepspeed_config.json --grad_accum_steps 2 --enforce_global_batch_size 16",
+  "env": {
+    "python_version": "3.11.14",
+    "torch_version": "2.9.1+cu128",
+    "transformers_version": "4.57.3",
+    "deepspeed_version": "0.18.3",
+    "cuda_version": "12.8"
+  },
+  "host": {
+    "hostname": "gn-0012",
+    "os": "Linux-4.18.0-477.27.1.el8_8.x86_64-x86_64-with-glibc2.28"
+  },
+  "hardware": {
+    "gpu_name": "Tesla V100-SXM2-16GB",
+    "gpu_count_visible": 2,
+    "world_size": 2,
+    "cuda_version": "12.8",
+    "cluster": "Big Purple"
+  },
+  "training_config": {
+    "model_name": "gpt2",
+    "model_size": "n_layer=12, n_head=12, n_embd=768",
+    "seq_len": 512,
+    "epochs": 1,
+    "micro_batch_size_per_gpu": 4,
+    "grad_accum_steps": 2,
+    "global_batch_size": 16,
+    "lr": 0.0001,
+    "optimizer": "AdamW",
+    "precision": "fp16_deepspeed",
+    "zero_stage": 1,
+    "dataset_name": "train_small",
+    "dataset_subset_sizes": {
+      "train": 56976,
+      "val": 5738
+    }
+  },
+  "deepspeed_config": {
+    "path": "src/deepspeed_config.json",
+    "sha256": "c84d643785f2eefe8b784adaf647ab67ae27fe7ca4065e546dc3bbad9478c38c",
+    "selected": {
+      "zero_stage": 1,
+      "fp16_enabled": true,
+      "wall_clock_breakdown": true
+    }
+  },
+  "schema_notes": {
+    "steps": "Deprecated; use micro_steps and optimizer_steps for clarity."
+  },
+  "epochs": [
+    {
+      "epoch_idx": 1,
+      "epoch_wall_time_sec": 509.19990706443787,
+      "steps": 7122,
+      "micro_steps": 7122,
+      "optimizer_steps": 3561,
+      "tokens_processed_global": 29171712,
+      "tokens_per_sec_global": 57289.311320138164,
+      "train_loss_avg_global": 6.287603278134653,
+      "val_loss_avg_global": 5.642414683577406,
+      "max_cuda_mem_allocated_bytes_rank0": 5880522752,
+      "max_cuda_mem_reserved_bytes_rank0": 6855589888,
+      "step_time_mean_sec": 0.047842707916044856,
+      "step_time_p50_sec": 0.047824384689331055,
+      "step_time_p95_sec": 0.04811745243072509,
+      "dataload_time_mean_sec": 0.0001431443092321426,
+      "max_cuda_mem_allocated_bytes_global": 5880522752,
+      "max_cuda_mem_reserved_bytes_global": 6855589888
+    }
+  ],
+  "summary": {
+    "total_wall_time_sec": 522.0138297080994,
+    "best_val_loss": 5.642414683577406,
+    "mean_tokens_per_sec_global": 57289.311320138164
+  },
+  "shutdown": {
+    "destroy_process_group_called": true,
+    "quiet_nccl_monitor": false
+  },
+  "completion": {
+    "run_complete_file": "RUN_COMPLETE.txt",
+    "printed_marker": true,
+    "timestamp_utc": "2026-01-08T19:50:57Z"
+  },
+  "scheduler": {
+    "type": "slurm",
+    "job_id": "17188844",
+    "nodelist": "gn-0012",
+    "nnodes": "1",
+    "procid": "0",
+    "localid": "0",
+    "partition": "gpu4_short"
+  }
+}

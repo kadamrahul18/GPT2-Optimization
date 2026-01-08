@@ -1,0 +1,1 @@
+[Rank 0] RUN_COMPLETE checkpoint_path=/gpfs/scratch/rsk8552/GPT2-Optimization/checkpoint/runs_20260108_182833_job17186821/2gpu_deepspeed world_size=2 tokens_per_sec=57289.311320138164 total_wall_time_sec=522.0138297080994 timestamp_utc=2026-01-08T19:50:57Z
