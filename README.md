@@ -118,6 +118,84 @@ python scripts/3_generate_charts.py \
     --optimized-json checkpoint/optimized_t4_small/training_metrics.json
 ```
 
+## Reproducible Scaling Benchmarks (Training)
+
+Artifacts used for the table below:
+- `benchmarks/bigpurple_v100_2026-01-08/1gpu/training_metrics.json`
+- `benchmarks/bigpurple_v100_2026-01-08/2gpu/training_metrics.json`
+- `benchmarks/bigpurple_v100_2026-01-08/4gpu/training_metrics.json`
+
+To regenerate the table:
+```bash
+python scripts/generate_scaling_table.py \
+  --gpu1 benchmarks/bigpurple_v100_2026-01-08/1gpu/training_metrics.json \
+  --gpu2 benchmarks/bigpurple_v100_2026-01-08/2gpu/training_metrics.json \
+  --gpu4 benchmarks/bigpurple_v100_2026-01-08/4gpu/training_metrics.json
+```
+
+Constants (fixed-work protocol):
+- `seq_len = 512`
+- `global_batch_size = 16`
+- `optimizer_steps = 3561`
+- `tokens_processed_global = 29,171,712`
+- `micro_batch_size_per_gpu = 4` with `grad_accum_steps` set per GPU count (below)
+
+Throughput is **global tokens/sec**, and wall time is the fixed-work total time for the run.
+
+| GPUs | Tokens/sec (global) | Wall time (s) | Speedup vs 1 GPU | Scaling efficiency |
+| --- | --- | --- | --- | --- |
+| 1 | 29600.05 | 1017.61 | 1.00 | 1.00 |
+| 2 | 57289.31 | 522.01 | 1.94 | 0.97 |
+| 4 | 100791.44 | 296.10 | 3.41 | 0.85 |
+
+Git commits in these artifacts:
+- 1 GPU: `efa044856c95a3b8bc8791370452d65df9767723`
+- 2/4 GPU: `bfcef35ad77bf757c0b05c0f04626233572744d5`
+
+How to reproduce (constant global batch size = 16 by adjusting grad accumulation):
+```bash
+# 1 GPU baseline
+export CUDA_VISIBLE_DEVICES=0
+python src/gpt2.py \
+  --run_type baseline \
+  --train_data_path train_small.bin \
+  --val_data_path val_small.bin \
+  --checkpoint_path checkpoint/1gpu \
+  --epochs 1 \
+  --seq_length 512 \
+  --micro_batch_size_per_gpu 4 \
+  --grad_accum_steps 4 \
+  --deepspeed_config src/deepspeed_config.json
+
+# 2 GPU DeepSpeed
+export CUDA_VISIBLE_DEVICES=0,1
+deepspeed src/gpt2.py \
+  --run_type optimized \
+  --train_data_path train_small.bin \
+  --val_data_path val_small.bin \
+  --checkpoint_path checkpoint/2gpu \
+  --epochs 1 \
+  --seq_length 512 \
+  --micro_batch_size_per_gpu 4 \
+  --grad_accum_steps 2 \
+  --deepspeed_config src/deepspeed_config.json
+
+# 4 GPU DeepSpeed
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+deepspeed src/gpt2.py \
+  --run_type optimized \
+  --train_data_path train_small.bin \
+  --val_data_path val_small.bin \
+  --checkpoint_path checkpoint/4gpu \
+  --epochs 1 \
+  --seq_length 512 \
+  --micro_batch_size_per_gpu 4 \
+  --grad_accum_steps 1 \
+  --deepspeed_config src/deepspeed_config.json
+```
+
+Global batch size is kept constant by reducing `grad_accum_steps` as GPU count increases.
+
 ## Artifacts
 
 - `training_metrics.json` includes a versioned training-only schema with per-epoch `tokens_per_sec_global`, `epoch_wall_time_sec`, rank-0 CUDA memory stats, and completion metadata.
