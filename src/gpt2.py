@@ -277,7 +277,9 @@ class GPT2Trainer:
                     if self.global_rank == 0:
                         print("[Rank 0] NCCL monitoring disabled via TORCH_NCCL_ENABLE_MONITORING=0")
                 import deepspeed
-                deepspeed.init_distributed()
+                print(f"[Rank {self.global_rank}] Initializing distributed process group via DeepSpeed...")
+                deepspeed.init_distributed(dist_backend="nccl", init_method="env://")
+                print(f"[Rank {self.global_rank}] Distributed process group initialized.")
             except Exception as e:
                 print(f"[Rank {self.global_rank}] ERROR: DeepSpeed distributed init failed: {e}")
                 sys.exit(1)
