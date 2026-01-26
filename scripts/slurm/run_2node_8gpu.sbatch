@@ -142,6 +142,39 @@ fi
   echo "[srun] which python: $(which python)"
   python -V
 
+  if [[ "${NSYS:-0}" == "1" ]]; then
+    if ! command -v nsys >/dev/null 2>&1; then
+      echo "[srun] ERROR: NSYS=1 but nsys not found in PATH"
+      exit 1
+    fi
+    NSYS_OUT_DIR="$RUN_DIR/nsys"
+    mkdir -p "$NSYS_OUT_DIR"
+    echo "[srun] NSYS enabled: writing to $NSYS_OUT_DIR"
+    nsys profile \
+      --force-overwrite=true \
+      --trace=cuda,nvtx,osrt \
+      --trace-fork-before-exec=true \
+      -o "$NSYS_OUT_DIR/nsys_job${SLURM_JOB_ID:-unknown}_node${SLURM_PROCID}_$$" \
+      python -m torch.distributed.run \
+        --nnodes="$SLURM_NNODES" \
+        --nproc_per_node=4 \
+        --node_rank="$SLURM_PROCID" \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+        --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+        src/gpt2.py \
+        --run_type optimized \
+        --train_data_path train_small.bin \
+        --val_data_path val_small.bin \
+        --checkpoint_path "$RUN_DIR" \
+        --epochs 1 \
+        --seq_length 512 \
+        --micro_batch_size_per_gpu 2 \
+        --grad_accum_steps 1 \
+        --deepspeed_config src/deepspeed_config.json
+    exit 0
+  fi
+
   python -m torch.distributed.run \
     --nnodes="$SLURM_NNODES" \
     --nproc_per_node=4 \
