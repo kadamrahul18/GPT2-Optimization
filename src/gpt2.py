@@ -127,7 +127,13 @@ def clean_distributed_shutdown(global_rank):
 
     if dist.is_available() and dist.is_initialized():
         try:
-            dist.barrier()
+            timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "120"))
+            if hasattr(dist, "monitored_barrier"):
+                from datetime import timedelta
+
+                dist.monitored_barrier(timeout=timedelta(seconds=timeout_sec))
+            else:
+                dist.barrier()
         except Exception as e:
             print(f"[Rank {global_rank}] Warning: dist.barrier failed during shutdown: {e}", flush=True)
         try:
