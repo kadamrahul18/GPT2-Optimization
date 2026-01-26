@@ -91,7 +91,7 @@ if [[ "${NSYS:-0}" == "1" ]]; then
     exit 1
   fi
   export NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_%h"
-  export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
+  export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --cuda-event-trace=false --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
   NSYS_WRAPPER="$RUN_DIR/profiles/nsys_wrapper.py"
   cat >"$NSYS_WRAPPER" <<'PY'
 import os
