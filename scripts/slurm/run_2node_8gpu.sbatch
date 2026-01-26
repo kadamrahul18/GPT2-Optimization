@@ -79,6 +79,24 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
+# --- Nsight Systems (NSYS=1) ---
+mkdir -p "$RUN_DIR/profiles"
+if [[ "${NSYS:-0}" == "1" ]]; then
+  if command -v module >/dev/null 2>&1; then
+    module load cuda/12.9
+  fi
+  export NSYS_BIN=/gpfs/share/apps/cuda/12.9/bin/nsys
+  if [ ! -x "$NSYS_BIN" ]; then
+    echo "ERROR: NSYS=1 but NSYS_BIN is not executable: $NSYS_BIN"
+    exit 1
+  fi
+  export NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_%h"
+  export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
+else
+  export NSYS_ARGS=""
+fi
+# --- End NSYS setup ---
+
 # --- Optional NCCL debug + topology artifacts (written under RUN_DIR) ---
 # Enable once when needed:
 #   NCCL_LOGS=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
@@ -142,39 +160,6 @@ fi
   echo "[srun] which python: $(which python)"
   python -V
 
-  if [[ "${NSYS:-0}" == "1" ]]; then
-    if ! command -v nsys >/dev/null 2>&1; then
-      echo "[srun] ERROR: NSYS=1 but nsys not found in PATH"
-      exit 1
-    fi
-    NSYS_OUT_DIR="$RUN_DIR/nsys"
-    mkdir -p "$NSYS_OUT_DIR"
-    echo "[srun] NSYS enabled: writing to $NSYS_OUT_DIR"
-    nsys profile \
-      --force-overwrite=true \
-      --trace=cuda,nvtx,osrt \
-      --trace-fork-before-exec=true \
-      -o "$NSYS_OUT_DIR/nsys_job${SLURM_JOB_ID:-unknown}_node${SLURM_PROCID}_$$" \
-      python -m torch.distributed.run \
-        --nnodes="$SLURM_NNODES" \
-        --nproc_per_node=4 \
-        --node_rank="$SLURM_PROCID" \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-        --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
-        src/gpt2.py \
-        --run_type optimized \
-        --train_data_path train_small.bin \
-        --val_data_path val_small.bin \
-        --checkpoint_path "$RUN_DIR" \
-        --epochs 1 \
-        --seq_length 512 \
-        --micro_batch_size_per_gpu 2 \
-        --grad_accum_steps 1 \
-        --deepspeed_config src/deepspeed_config.json
-    exit 0
-  fi
-
   python -m torch.distributed.run \
     --nnodes="$SLURM_NNODES" \
     --nproc_per_node=4 \
@@ -182,14 +167,42 @@ fi
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
-    src/gpt2.py \
-    --run_type optimized \
-    --train_data_path train_small.bin \
-    --val_data_path val_small.bin \
-    --checkpoint_path "$RUN_DIR" \
-    --epochs 1 \
-    --seq_length 512 \
-    --micro_batch_size_per_gpu 2 \
-    --grad_accum_steps 1 \
-    --deepspeed_config src/deepspeed_config.json
+    bash -lc "
+      set -euo pipefail
+      WRAP=\"\"
+      if [[ \"\${NSYS:-0}\" == \"1\" && \"\${LOCAL_RANK:-}\" == \"0\" ]]; then
+        WRAP=\"\${NSYS_BIN} \${NSYS_ARGS}\"
+      fi
+      if [[ -n \"\${WRAP}\" ]]; then
+        eval \"\${WRAP} python -u src/gpt2.py \
+          --run_type optimized \
+          --train_data_path train_small.bin \
+          --val_data_path val_small.bin \
+          --checkpoint_path \\\"$RUN_DIR\\\" \
+          --epochs 1 \
+          --seq_length 512 \
+          --micro_batch_size_per_gpu 2 \
+          --grad_accum_steps 1 \
+          --deepspeed_config src/deepspeed_config.json\"
+      else
+        python -u src/gpt2.py \
+          --run_type optimized \
+          --train_data_path train_small.bin \
+          --val_data_path val_small.bin \
+          --checkpoint_path \"$RUN_DIR\" \
+          --epochs 1 \
+          --seq_length 512 \
+          --micro_batch_size_per_gpu 2 \
+          --grad_accum_steps 1 \
+          --deepspeed_config src/deepspeed_config.json
+      fi
+    "
 '
+
+if [[ "${NSYS:-0}" == "1" ]]; then
+  shopt -s nullglob
+  for f in "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.qdrep; do
+    host="$(basename "$f" | sed -E "s/nsys_${SLURM_JOB_ID}_//; s/\\.qdrep$//")"
+    "$NSYS_BIN" stats --report gpu-kern-summary,gpu-api-summary,osrt-summary "$f" > "$RUN_DIR/profiles/nsys_stats_${host}.txt" || true
+  done
+fi
