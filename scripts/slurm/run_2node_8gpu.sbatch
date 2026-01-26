@@ -92,6 +92,49 @@ if [[ "${NSYS:-0}" == "1" ]]; then
   fi
   export NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_%h"
   export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
+  NSYS_WRAPPER="$RUN_DIR/profiles/nsys_wrapper.py"
+  cat >"$NSYS_WRAPPER" <<'PY'
+import os
+import subprocess
+import sys
+
+
+def parse_local_rank(argv):
+    env_local_rank = os.environ.get("LOCAL_RANK")
+    if env_local_rank is not None:
+        return int(env_local_rank)
+    for arg in argv:
+        if arg.startswith("--local_rank=") or arg.startswith("--local-rank="):
+            return int(arg.split("=", 1)[1])
+    return None
+
+
+def main():
+    local_rank = parse_local_rank(sys.argv[1:])
+    if local_rank is None:
+        local_rank = 0
+
+    repo_root = os.environ.get("REPO_ROOT", os.getcwd())
+    nsys_bin = os.environ.get("NSYS_BIN")
+    nsys_args = os.environ.get("NSYS_ARGS", "")
+
+    cmd = [sys.executable, "-u", os.path.join(repo_root, "src", "gpt2.py"), *sys.argv[1:]]
+
+    if local_rank == 0:
+        if not nsys_bin or not os.path.exists(nsys_bin):
+            raise SystemExit("NSYS=1 but NSYS_BIN is missing/unset in environment")
+        nsys_cmd = [nsys_bin, *nsys_args.split(), *cmd]
+        proc = subprocess.run(nsys_cmd, cwd=repo_root)
+        raise SystemExit(proc.returncode)
+
+    proc = subprocess.run(cmd, cwd=repo_root)
+    raise SystemExit(proc.returncode)
+
+
+if __name__ == "__main__":
+    main()
+PY
+  export NSYS_WRAPPER
 else
   export NSYS_ARGS=""
 fi
@@ -160,6 +203,11 @@ fi
   echo "[srun] which python: $(which python)"
   python -V
 
+  TRAIN_SCRIPT="src/gpt2.py"
+  if [[ "${NSYS:-0}" == "1" ]]; then
+    TRAIN_SCRIPT="${NSYS_WRAPPER}"
+  fi
+
   python -m torch.distributed.run \
     --nnodes="$SLURM_NNODES" \
     --nproc_per_node=4 \
@@ -167,36 +215,16 @@ fi
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
-    bash -lc "
-      set -euo pipefail
-      WRAP=\"\"
-      if [[ \"\${NSYS:-0}\" == \"1\" && \"\${LOCAL_RANK:-}\" == \"0\" ]]; then
-        WRAP=\"\${NSYS_BIN} \${NSYS_ARGS}\"
-      fi
-      if [[ -n \"\${WRAP}\" ]]; then
-        eval \"\${WRAP} python -u src/gpt2.py \
-          --run_type optimized \
-          --train_data_path train_small.bin \
-          --val_data_path val_small.bin \
-          --checkpoint_path \\\"$RUN_DIR\\\" \
-          --epochs 1 \
-          --seq_length 512 \
-          --micro_batch_size_per_gpu 2 \
-          --grad_accum_steps 1 \
-          --deepspeed_config src/deepspeed_config.json\"
-      else
-        python -u src/gpt2.py \
-          --run_type optimized \
-          --train_data_path train_small.bin \
-          --val_data_path val_small.bin \
-          --checkpoint_path \"$RUN_DIR\" \
-          --epochs 1 \
-          --seq_length 512 \
-          --micro_batch_size_per_gpu 2 \
-          --grad_accum_steps 1 \
-          --deepspeed_config src/deepspeed_config.json
-      fi
-    "
+    "$TRAIN_SCRIPT" \
+    --run_type optimized \
+    --train_data_path train_small.bin \
+    --val_data_path val_small.bin \
+    --checkpoint_path "'"$RUN_DIR"'" \
+    --epochs 1 \
+    --seq_length 512 \
+    --micro_batch_size_per_gpu 2 \
+    --grad_accum_steps 1 \
+    --deepspeed_config src/deepspeed_config.json
 '
 
 if [[ "${NSYS:-0}" == "1" ]]; then
