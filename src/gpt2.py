@@ -1047,7 +1047,7 @@ def main():
     parser.add_argument('--val_data_path', type=str, required=True, help='Path to the validation binary file (val.bin)')
 
     parser.add_argument('--deepspeed_config', type=str, required=True, help='Path to DeepSpeed config file')
-    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank passed by DeepSpeed launcher')
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=-1, help='Local rank passed by launcher')
 
     parser.add_argument('--run_type', type=str, choices=['baseline', 'optimized'], required=True, help='Type of run')
 

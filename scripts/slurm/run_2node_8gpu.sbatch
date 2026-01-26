@@ -11,8 +11,8 @@
 #SBATCH --job-name=gpt2_2node_8gpu
 #SBATCH --nodes=2
 #SBATCH --gres=gpu:4
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
 #SBATCH --time=02:00:00
 
 set -euo pipefail
@@ -38,14 +38,17 @@ echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}"
 echo "HOSTS=${HOSTS//$'\n'/,}"
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
-# One process per GPU (4 per node) via Slurm; DeepSpeed initializes with env://.
-srun --gpu-bind=single:1 bash -lc '
+# One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
+srun bash -lc '
   set -euo pipefail
-  export WORLD_SIZE="$SLURM_NTASKS"
-  export RANK="$SLURM_PROCID"
-  export LOCAL_RANK="$SLURM_LOCALID"
-
-  python -u src/gpt2.py \
+  torchrun \
+    --nnodes="$SLURM_NNODES" \
+    --nproc_per_node=4 \
+    --node_rank="$SLURM_NODEID" \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+    --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+    src/gpt2.py \
     --run_type optimized \
     --train_data_path train_small.bin \
     --val_data_path val_small.bin \
@@ -54,7 +57,5 @@ srun --gpu-bind=single:1 bash -lc '
     --seq_length 512 \
     --micro_batch_size_per_gpu 4 \
     --grad_accum_steps 1 \
-    --deepspeed_config src/deepspeed_config.json \
-    --local_rank "$SLURM_LOCALID"
+    --deepspeed_config src/deepspeed_config.json
 '
-
