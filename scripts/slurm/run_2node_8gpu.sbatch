@@ -78,7 +78,10 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
-# --- NCCL debug + topology artifacts (written under RUN_DIR) ---
+# --- Optional NCCL debug + topology artifacts (written under RUN_DIR) ---
+# Enable once when needed:
+#   NCCL_LOGS=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
+#
 # Logs:
 # - NCCL per-rank logs:   $RUN_DIR/nccl_rank_*.log
 # - NCCL topology dump:   $RUN_DIR/nccl_topo.xml
@@ -86,16 +89,16 @@ fi
 # Quick grep tips:
 # - Transport (IB vs socket):   grep -E "NET/|Using (IB|Socket)|bootstrap" nccl_rank_*.log
 # - Rings/trees/channels:       grep -E "Channel|Rings|Trees|graph" nccl_rank_*.log
-export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH,NET,COLL
-export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
-export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
-# NCCL_ASYNC_ERROR_HANDLING is deprecated in newer PyTorch builds.
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-unset NCCL_ASYNC_ERROR_HANDLING || true
-export NCCL_IB_HCA=mlx5_0
-export NCCL_SOCKET_IFNAME=^lo,docker0
-# --- End NCCL debug ---
+if [[ "${NCCL_LOGS:-0}" == "1" ]]; then
+  export NCCL_DEBUG=INFO
+  export NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH,NET,COLL
+  export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
+  export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+  export NCCL_IB_HCA=mlx5_0
+  export NCCL_SOCKET_IFNAME=^lo,docker0
+fi
+# --- End optional NCCL debug ---
 
 HOSTS="$("$SRUN" --export=ALL --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
 if [ -z "${HOSTS//[[:space:]]/}" ]; then

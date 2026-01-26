@@ -106,6 +106,11 @@ By default, outputs land in `benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/`. 
 RUN_DIR=$SCRATCH/gpt2_runs/bigpurple_v100_2026-01-26/8gpu_2node sbatch scripts/slurm/run_2node_8gpu.sbatch
 ```
 
+To generate NCCL logs/topology once (saved under `RUN_DIR`):
+```bash
+NCCL_LOGS=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
+
 ## Artifacts
 
 - `training_metrics.json`: per-epoch tokens/sec, epoch wall time, batch config, and completion metadata.
