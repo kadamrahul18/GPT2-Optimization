@@ -101,6 +101,10 @@ sbatch scripts/slurm/run_2node_8gpu.sbatch
 ```
 
 By default, outputs land in `benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/`. Override with `RUN_DIR=...` when submitting if desired.
+```bash
+# Example (recommended if your repo checkout is read-only on the cluster):
+RUN_DIR=$SCRATCH/gpt2_runs/bigpurple_v100_2026-01-26/8gpu_2node sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
 
 ## Artifacts
 

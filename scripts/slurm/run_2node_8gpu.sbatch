@@ -21,7 +21,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 RUN_DIR="${RUN_DIR:-benchmarks/bigpurple_v100_2026-01-26/8gpu_2node}"
-mkdir -p "$RUN_DIR"
+if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
+  echo "ERROR: cannot create RUN_DIR='$RUN_DIR' (permission denied)."
+  echo "Set RUN_DIR to a writable path (e.g. \$SCRATCH/... or \$HOME/...) and resubmit:"
+  echo "  RUN_DIR=\$SCRATCH/gpt2_runs/bigpurple_v100_2026-01-26/8gpu_2node sbatch scripts/slurm/run_2node_8gpu.sbatch"
+  exit 1
+fi
 
 HOSTS="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$SLURM_NODELIST}")"
 MASTER_ADDR="$(echo "$HOSTS" | head -n 1)"
