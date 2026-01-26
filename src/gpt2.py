@@ -128,12 +128,32 @@ def clean_distributed_shutdown(global_rank):
     if dist.is_available() and dist.is_initialized():
         try:
             timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "120"))
-            if hasattr(dist, "monitored_barrier"):
+            backend = None
+            try:
+                backend = dist.get_backend()
+            except Exception:
+                backend = None
+
+            if backend == "gloo" and hasattr(dist, "monitored_barrier"):
                 from datetime import timedelta
 
                 dist.monitored_barrier(timeout=timedelta(seconds=timeout_sec))
             else:
-                dist.barrier()
+                # Best-effort time-bounded barrier to avoid end-of-run hangs.
+                work = dist.barrier(async_op=True)
+                if hasattr(work, "is_completed"):
+                    deadline = time.time() + timeout_sec
+                    while time.time() < deadline and not work.is_completed():
+                        time.sleep(0.1)
+                    if not work.is_completed():
+                        print(
+                            f"[Rank {global_rank}] Warning: shutdown barrier timed out after {timeout_sec}s; "
+                            "continuing with destroy_process_group.",
+                            flush=True,
+                        )
+                else:
+                    # Fall back to a regular barrier if async completion can't be polled.
+                    dist.barrier()
         except Exception as e:
             print(f"[Rank {global_rank}] Warning: dist.barrier failed during shutdown: {e}", flush=True)
         try:
