@@ -35,6 +35,7 @@ echo "SRUN=$SRUN"
 # Replace `deepspeed` if your env name differs.
 if command -v module >/dev/null 2>&1; then
   module purge
+  module load cuda/12.9
   # Some module systems reset PATH; keep Slurm tools available.
   export PATH="$(dirname "$SRUN"):$PATH"
 fi
