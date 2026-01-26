@@ -121,6 +121,5 @@ echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
     --seq_length 512 \
     --micro_batch_size_per_gpu 2 \
     --grad_accum_steps 1 \
-    --deepspeed_config src/deepspeed_config.json \
-    --local_rank "$LOCAL_RANK"
+    --deepspeed_config src/deepspeed_config.json
 '
