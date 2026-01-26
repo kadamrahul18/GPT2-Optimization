@@ -117,6 +117,27 @@ def build_launcher_metadata(trainer, checkpoint_path):
         "nccl_env": collect_prefixed_env(["NCCL_", "TORCH_NCCL_"]),
     }
 
+
+def clean_distributed_shutdown(global_rank):
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    if dist.is_available() and dist.is_initialized():
+        try:
+            dist.barrier()
+        except Exception as e:
+            print(f"[Rank {global_rank}] Warning: dist.barrier failed during shutdown: {e}", flush=True)
+        try:
+            dist.destroy_process_group()
+        except Exception as e:
+            print(
+                f"[Rank {global_rank}] Warning: dist.destroy_process_group failed during shutdown: {e}",
+                flush=True,
+            )
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -323,6 +344,10 @@ class GPT2Trainer:
             or os.getenv("LOCAL_RANK") is not None
         )
         self.use_deepspeed = args.run_type == "optimized" or distributed_env
+        if args.num_workers is not None:
+            self.num_workers = int(args.num_workers)
+        else:
+            self.num_workers = 0 if distributed_env else 2
         if self.use_deepspeed and not dist.is_initialized():
             try:
                 if self.args.quiet_nccl_monitor:
@@ -441,10 +466,27 @@ class GPT2Trainer:
             self.rank_print("Initializing DeepSpeed engine...")
             try:
                  import deepspeed
+                 train_sampler = None
+                 if self.world_size > 1:
+                     train_sampler = DistributedSampler(
+                         self.train_dataset,
+                         num_replicas=self.world_size,
+                         rank=self.global_rank,
+                         shuffle=True,
+                     )
+                 train_dataloader = DataLoader(
+                     self.train_dataset,
+                     batch_size=self.micro_batch_size,
+                     shuffle=train_sampler is None,
+                     sampler=train_sampler,
+                     num_workers=self.num_workers,
+                     pin_memory=True,
+                     drop_last=True,
+                 )
                  self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
                      model=self.model,
                      model_parameters=self.model.parameters(),
-                     training_data=self.train_dataset,
+                     training_dataloader=train_dataloader,
                      config=deepspeed_config
                  )
                  self.rank_print("DeepSpeed Engine Initialized Successfully.")
@@ -470,7 +512,7 @@ class GPT2Trainer:
                 self.train_dataset,
                 batch_size=self.micro_batch_size,
                 shuffle=True,
-                num_workers=2,
+                num_workers=self.num_workers,
                 pin_memory=True,
                 drop_last=True,
             )
@@ -482,12 +524,19 @@ class GPT2Trainer:
              self.rank_print("Passed barrier after DeepSpeed initialization.")
 
         if len(self.val_dataset) > 0:
-            val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.world_size, rank=self.global_rank, shuffle=False)
+            val_sampler = None
+            if self.world_size > 1:
+                val_sampler = DistributedSampler(
+                    self.val_dataset,
+                    num_replicas=self.world_size,
+                    rank=self.global_rank,
+                    shuffle=False,
+                )
             self.val_dataloader = DataLoader(
                 self.val_dataset,
                 batch_size=self.micro_batch_size,
                 sampler=val_sampler,
-                num_workers=2,
+                num_workers=self.num_workers,
                 pin_memory=True,
                 drop_last=True
             )
@@ -1069,6 +1118,7 @@ def main():
     # parser.add_argument('--pipeline_stages', type=int, default=1, help='Number of pipeline stages (overridden by deepspeed config)')
 
     parser.add_argument('--profile', action='store_true', help='Enable PyTorch profiler (logs saved in checkpoint_path/profiler_logs)')
+    parser.add_argument('--num_workers', type=int, default=None, help='DataLoader worker processes (default: 0 for distributed, 2 otherwise)')
 
 
     args = parser.parse_args()
@@ -1086,51 +1136,52 @@ def main():
     if rank == 0 and world_size <= 1 and local_rank_missing:
          print("Warning: local_rank not set by launcher, running in non-distributed mode.")
 
-    trainer = GPT2Trainer(args)
+    trainer = None
+    global_rank_for_shutdown = rank
+    try:
+        trainer = GPT2Trainer(args)
+        global_rank_for_shutdown = trainer.global_rank
 
-    trainer.train()
+        trainer.train()
 
-    if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        if trainer.global_rank == 0:
+            launcher_metadata_path = os.path.join(args.checkpoint_path, "launcher_metadata.json")
+            metrics_utils.write_json_atomic(
+                launcher_metadata_path,
+                build_launcher_metadata(trainer=trainer, checkpoint_path=args.checkpoint_path),
+            )
+            print(f"[Rank 0] LAUNCHER_METADATA_WRITE_DONE path={launcher_metadata_path}", flush=True)
 
-    if trainer.global_rank == 0:
-        launcher_metadata_path = os.path.join(args.checkpoint_path, "launcher_metadata.json")
-        metrics_utils.write_json_atomic(
-            launcher_metadata_path,
-            build_launcher_metadata(trainer=trainer, checkpoint_path=args.checkpoint_path),
-        )
-        print(f"[Rank 0] LAUNCHER_METADATA_WRITE_DONE path={launcher_metadata_path}", flush=True)
+        if trainer.global_rank == 0:
+            timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            trainer.metrics["completion"] = {
+                "run_complete_file": "RUN_COMPLETE.txt",
+                "printed_marker": True,
+                "timestamp_utc": timestamp_utc,
+            }
+            trainer.metrics["shutdown"]["destroy_process_group_called"] = dist.is_available() and dist.is_initialized()
+            trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
 
-    if trainer.global_rank == 0:
-        timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        trainer.metrics["completion"] = {
-            "run_complete_file": "RUN_COMPLETE.txt",
-            "printed_marker": True,
-            "timestamp_utc": timestamp_utc,
-        }
-        trainer.metrics["shutdown"]["destroy_process_group_called"] = dist.is_available() and dist.is_initialized()
-        trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
+            metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
+            trainer.save_metrics(trainer.metrics, metrics_file_path)
+            print(f"[Rank 0] METRICS_WRITE_DONE path={metrics_file_path}", flush=True)
 
-        metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
-        trainer.save_metrics(trainer.metrics, metrics_file_path)
-        print(f"[Rank 0] METRICS_WRITE_DONE path={metrics_file_path}", flush=True)
-
-    if trainer.global_rank == 0:
-        tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
-        total_wall_time = trainer.metrics.get("summary", {}).get("total_wall_time_sec")
-        run_complete_line = (
-            f"[Rank 0] RUN_COMPLETE checkpoint_path={args.checkpoint_path} "
-            f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
-            f"total_wall_time_sec={total_wall_time}"
-        )
-        run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
-        os.makedirs(args.checkpoint_path, exist_ok=True)
-        with open(run_complete_path, "w", encoding="utf-8") as f:
-            f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
-        print(run_complete_line, flush=True)
-
-    graceful_distributed_shutdown()
-    print(f"[Rank {trainer.global_rank}] EXITING cleanly", flush=True)
+        if trainer.global_rank == 0:
+            tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
+            total_wall_time = trainer.metrics.get("summary", {}).get("total_wall_time_sec")
+            run_complete_line = (
+                f"[Rank 0] RUN_COMPLETE checkpoint_path={args.checkpoint_path} "
+                f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
+                f"total_wall_time_sec={total_wall_time}"
+            )
+            run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
+            os.makedirs(args.checkpoint_path, exist_ok=True)
+            with open(run_complete_path, "w", encoding="utf-8") as f:
+                f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
+            print(run_complete_line, flush=True)
+    finally:
+        clean_distributed_shutdown(global_rank=global_rank_for_shutdown)
+        print(f"[Rank {global_rank_for_shutdown}] EXITING cleanly", flush=True)
 
 if __name__ == '__main__':
     main()
