@@ -72,6 +72,41 @@ def graceful_distributed_shutdown():
         )
         return False
 
+
+def build_launcher_metadata(trainer, checkpoint_path):
+    import socket
+
+    def collect_prefixed_env(prefixes):
+        out = {}
+        for key, value in os.environ.items():
+            if any(key.startswith(prefix) for prefix in prefixes):
+                out[key] = value
+        return out
+
+    slurm = {
+        "job_id": os.getenv("SLURM_JOB_ID"),
+        "nodelist": os.getenv("SLURM_NODELIST") or os.getenv("SLURM_JOB_NODELIST"),
+        "hosts": os.getenv("SLURM_HOSTS"),
+    }
+    slurm = {k: v for k, v in slurm.items() if v}
+
+    env_summary = {
+        "CUDA_VISIBLE_DEVICES": os.getenv("CUDA_VISIBLE_DEVICES"),
+        "MASTER_ADDR": os.getenv("MASTER_ADDR"),
+        "MASTER_PORT": os.getenv("MASTER_PORT"),
+    }
+    env_summary = {k: v for k, v in env_summary.items() if v}
+
+    return {
+        "checkpoint_path": checkpoint_path,
+        "rank0_host": socket.gethostname(),
+        "world_size": trainer.world_size,
+        "git_commit": os.getenv("GIT_COMMIT") or trainer.metrics.get("git_commit", "unknown"),
+        "slurm": slurm,
+        "env": env_summary,
+        "nccl_env": collect_prefixed_env(["NCCL_", "TORCH_NCCL_"]),
+    }
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -1039,6 +1074,14 @@ def main():
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
+
+    if trainer.global_rank == 0:
+        launcher_metadata_path = os.path.join(args.checkpoint_path, "launcher_metadata.json")
+        metrics_utils.write_json_atomic(
+            launcher_metadata_path,
+            build_launcher_metadata(trainer=trainer, checkpoint_path=args.checkpoint_path),
+        )
+        print(f"[Rank 0] LAUNCHER_METADATA_WRITE_DONE path={launcher_metadata_path}", flush=True)
 
     if trainer.global_rank == 0:
         timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
