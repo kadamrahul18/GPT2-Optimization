@@ -12,7 +12,7 @@
 #SBATCH --nodes=2
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --time=02:00:00
 
 set -euo pipefail
@@ -20,8 +20,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-RUN_DATE="${RUN_DATE:-$(date +%Y-%m-%d)}"
-RUN_DIR="benchmarks/bigpurple_v100_${RUN_DATE}/8gpu_2node"
+RUN_DIR="${RUN_DIR:-benchmarks/bigpurple_v100_2026-01-26/8gpu_2node}"
 mkdir -p "$RUN_DIR"
 
 HOSTS="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$SLURM_NODELIST}")"
@@ -55,7 +54,7 @@ srun bash -lc '
     --checkpoint_path "$RUN_DIR" \
     --epochs 1 \
     --seq_length 512 \
-    --micro_batch_size_per_gpu 4 \
+    --micro_batch_size_per_gpu 2 \
     --grad_accum_steps 1 \
     --deepspeed_config src/deepspeed_config.json
 '

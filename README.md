@@ -100,7 +100,7 @@ Slurm (2 nodes × 4 GPUs/node, 8 total):
 sbatch scripts/slurm/run_2node_8gpu.sbatch
 ```
 
-Outputs land in `benchmarks/bigpurple_v100_YYYY-MM-DD/8gpu_2node/` (e.g. `benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/`).
+By default, outputs land in `benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/`. Override with `RUN_DIR=...` when submitting if desired.
 
 ## Artifacts
 
