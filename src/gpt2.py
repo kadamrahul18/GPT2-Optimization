@@ -483,12 +483,26 @@ class GPT2Trainer:
                      pin_memory=True,
                      drop_last=True,
                  )
-                 self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
-                     model=self.model,
-                     model_parameters=self.model.parameters(),
-                     training_dataloader=train_dataloader,
-                     config=deepspeed_config
-                 )
+                 try:
+                     self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
+                         model=self.model,
+                         model_parameters=self.model.parameters(),
+                         training_dataloader=train_dataloader,
+                         config=deepspeed_config
+                     )
+                 except TypeError:
+                     if self.global_rank == 0:
+                         print(
+                             "[Rank 0] DeepSpeed initialize() does not support training_dataloader; "
+                             "falling back to training_data.",
+                             flush=True,
+                         )
+                     self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
+                         model=self.model,
+                         model_parameters=self.model.parameters(),
+                         training_data=self.train_dataset,
+                         config=deepspeed_config
+                     )
                  self.rank_print("DeepSpeed Engine Initialized Successfully.")
                  self.rank_print(f"Using device: {self.model_engine.local_rank} (mapped to {self.current_device})")
             except Exception as e:
