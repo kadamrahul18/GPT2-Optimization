@@ -100,7 +100,12 @@ echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 # One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
 "$SRUN" bash -lc '
   set -euo pipefail
-  torchrun \
+  source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
+  conda activate deepspeed
+  echo "[srun] which python: $(which python)"
+  python -V
+
+  python -m torch.distributed.run \
     --nnodes="$SLURM_NNODES" \
     --nproc_per_node=4 \
     --node_rank="$SLURM_PROCID" \
@@ -116,5 +121,6 @@ echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
     --seq_length 512 \
     --micro_batch_size_per_gpu 2 \
     --grad_accum_steps 1 \
-    --deepspeed_config src/deepspeed_config.json
+    --deepspeed_config src/deepspeed_config.json \
+    --local_rank "$LOCAL_RANK"
 '
