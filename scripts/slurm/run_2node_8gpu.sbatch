@@ -90,7 +90,9 @@ export NCCL_DEBUG=INFO
 export NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH,NET,COLL
 export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
 export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
-export NCCL_ASYNC_ERROR_HANDLING=1
+# NCCL_ASYNC_ERROR_HANDLING is deprecated in newer PyTorch builds.
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+unset NCCL_ASYNC_ERROR_HANDLING || true
 export NCCL_IB_HCA=mlx5_0
 export NCCL_SOCKET_IFNAME=^lo,docker0
 # --- End NCCL debug ---
