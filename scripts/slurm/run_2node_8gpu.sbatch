@@ -64,7 +64,12 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
-HOSTS="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-$SLURM_NODELIST}")"
+HOSTS="$(srun --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
+if [ -z "${HOSTS//[[:space:]]/}" ]; then
+  echo "ERROR: failed to discover hosts via srun; got empty host list."
+  echo "SLURM_NNODES=${SLURM_NNODES:-unknown}"
+  exit 1
+fi
 MASTER_ADDR="$(echo "$HOSTS" | head -n 1)"
 MASTER_PORT="${MASTER_PORT:-29511}"
 
