@@ -20,11 +20,21 @@ import metrics as metrics_utils
 from transformers import GPT2Tokenizer
 
 def get_dist_info(args):
-    local_rank = int(os.environ.get("LOCAL_RANK", getattr(args, "local_rank", 0)))
-    if local_rank < 0:
-        local_rank = 0
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    env_local_rank = os.environ.get("LOCAL_RANK")
+    if env_local_rank is not None:
+        local_rank = int(env_local_rank)
+    else:
+        arg_local_rank = getattr(args, "local_rank", None)
+        if arg_local_rank is not None and int(arg_local_rank) >= 0:
+            local_rank = int(arg_local_rank)
+        else:
+            local_rank = 0
+
+    env_rank = os.environ.get("RANK")
+    rank = int(env_rank) if env_rank is not None else 0
+
+    env_world_size = os.environ.get("WORLD_SIZE")
+    world_size = int(env_world_size) if env_world_size is not None else 1
     return local_rank, rank, world_size
 
 
@@ -307,7 +317,12 @@ class GPT2Trainer:
         else:
             self.current_device = torch.device("cpu")
 
-        self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
+        distributed_env = (
+            int(os.getenv("WORLD_SIZE", "1")) > 1
+            or os.getenv("RANK") is not None
+            or os.getenv("LOCAL_RANK") is not None
+        )
+        self.use_deepspeed = args.run_type == "optimized" or distributed_env
         if self.use_deepspeed and not dist.is_initialized():
             try:
                 if self.args.quiet_nccl_monitor:
@@ -1061,12 +1076,15 @@ def main():
     if args.quiet_nccl_monitor:
          os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
 
-
-    if args.local_rank == -1:
+    env_rank = os.environ.get("RANK")
+    rank = int(env_rank) if env_rank is not None else 0
+    env_world_size = os.environ.get("WORLD_SIZE")
+    world_size = int(env_world_size) if env_world_size is not None else 1
+    local_rank_env = os.environ.get("LOCAL_RANK")
+    local_rank_arg = getattr(args, "local_rank", None)
+    local_rank_missing = local_rank_env is None and (local_rank_arg is None or int(local_rank_arg) < 0)
+    if rank == 0 and world_size <= 1 and local_rank_missing:
          print("Warning: local_rank not set by launcher, running in non-distributed mode.")
-         pass
-    else:
-         pass
 
     trainer = GPT2Trainer(args)
 
