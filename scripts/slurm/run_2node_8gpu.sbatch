@@ -20,12 +20,12 @@
 set -euo pipefail
 
 # --- Environment setup (edit before running) ---
-# Replace <placeholder ENV_NAME> with your conda env name.
+# Replace `deepspeed` if your env name differs.
 if command -v module >/dev/null 2>&1; then
   module purge
 fi
 source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
-conda activate <placeholder ENV_NAME>
+conda activate deepspeed
 echo "which python: $(which python)"
 python -V
 python - <<'PY'
