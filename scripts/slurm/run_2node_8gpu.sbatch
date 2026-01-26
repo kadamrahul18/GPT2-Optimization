@@ -78,7 +78,24 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
-HOSTS="$("$SRUN" --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
+# --- NCCL debug + topology artifacts (written under RUN_DIR) ---
+# Logs:
+# - NCCL per-rank logs:   $RUN_DIR/nccl_rank_*.log
+# - NCCL topology dump:   $RUN_DIR/nccl_topo.xml
+#
+# Quick grep tips:
+# - Transport (IB vs socket):   grep -E "NET/|Using (IB|Socket)|bootstrap" nccl_rank_*.log
+# - Rings/trees/channels:       grep -E "Channel|Rings|Trees|graph" nccl_rank_*.log
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH,NET,COLL
+export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
+export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_IB_HCA=mlx5_0
+export NCCL_SOCKET_IFNAME=^lo,docker0
+# --- End NCCL debug ---
+
+HOSTS="$("$SRUN" --export=ALL --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
 if [ -z "${HOSTS//[[:space:]]/}" ]; then
   echo "ERROR: failed to discover hosts via srun; got empty host list."
   echo "SLURM_NNODES=${SLURM_NNODES:-unknown}"
@@ -97,8 +114,22 @@ echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}"
 echo "HOSTS=${HOSTS//$'\n'/,}"
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
+# --- System evidence (once, on rank0 host) ---
+if [ -n "${MASTER_ADDR:-}" ]; then
+  "$SRUN" --export=ALL --nodes=1 --ntasks=1 --nodelist="$MASTER_ADDR" bash -lc '
+    set -euo pipefail
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      nvidia-smi topo -m > "$RUN_DIR/topo.txt"
+    fi
+    if command -v ibstat >/dev/null 2>&1; then
+      ibstat > "$RUN_DIR/ibstat.txt"
+    fi
+  ' || true
+fi
+# --- End system evidence ---
+
 # One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
-"$SRUN" bash -lc '
+"$SRUN" --export=ALL bash -lc '
   set -euo pipefail
   source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
   conda activate deepspeed
