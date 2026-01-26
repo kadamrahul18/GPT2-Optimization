@@ -9,13 +9,39 @@
 #
 
 #SBATCH --job-name=gpt2_2node_8gpu
+#SBATCH --partition=gpu4_short
 #SBATCH --nodes=2
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 #SBATCH --time=02:00:00
 
 set -euo pipefail
+
+# --- Environment setup (edit before running) ---
+# Replace <placeholder ENV_NAME> with your conda env name.
+if command -v module >/dev/null 2>&1; then
+  module purge
+fi
+source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
+conda activate <placeholder ENV_NAME>
+echo "which python: $(which python)"
+python -V
+python - <<'PY'
+try:
+    import torch
+    print(f"torch: {torch.__version__}")
+    print(f"cuda_available: {torch.cuda.is_available()}")
+    print(f"torch.version.cuda: {torch.version.cuda}")
+    if torch.cuda.is_available():
+        print(f"cuda_device_count: {torch.cuda.device_count()}")
+        print(f"cuda_device_name0: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print(f"ERROR: torch/cuda check failed: {e}")
+    raise
+PY
+# --- End environment setup ---
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
