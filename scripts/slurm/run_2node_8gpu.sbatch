@@ -35,6 +35,8 @@ echo "SRUN=$SRUN"
 # Replace `deepspeed` if your env name differs.
 if command -v module >/dev/null 2>&1; then
   module purge
+  # Some module systems reset PATH; keep Slurm tools available.
+  export PATH="$(dirname "$SRUN"):$PATH"
 fi
 source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
 conda activate deepspeed
