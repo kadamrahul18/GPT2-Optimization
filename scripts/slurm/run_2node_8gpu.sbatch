@@ -43,11 +43,10 @@ except Exception as e:
 PY
 # --- End environment setup ---
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 cd "$REPO_ROOT"
 
-RUN_DIR_DEFAULT="${REPO_ROOT}/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node"
-RUN_DIR="${RUN_DIR:-$RUN_DIR_DEFAULT}"
+RUN_DIR="${RUN_DIR:-${REPO_ROOT}/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node}"
 
 echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unknown}"
 echo "REPO_ROOT=$REPO_ROOT"
