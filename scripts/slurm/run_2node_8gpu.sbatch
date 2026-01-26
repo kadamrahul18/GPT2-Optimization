@@ -19,6 +19,18 @@
 
 set -euo pipefail
 
+# --- Slurm srun resolution ---
+SRUN="${SRUN:-/cm/shared/apps/slurm/current/bin/srun}"
+if [ ! -x "$SRUN" ]; then
+  echo "ERROR: srun not found/executable at SRUN='$SRUN'."
+  echo "Set SRUN to the absolute path of srun and retry (e.g. SRUN=/path/to/srun sbatch ...)."
+  exit 1
+fi
+export PATH="$(dirname "$SRUN"):$PATH"
+echo "SRUN=$SRUN"
+"$SRUN" --version || true
+# --- End srun resolution ---
+
 # --- Environment setup (edit before running) ---
 # Replace `deepspeed` if your env name differs.
 if command -v module >/dev/null 2>&1; then
@@ -64,7 +76,7 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
-HOSTS="$(srun --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
+HOSTS="$("$SRUN" --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
 if [ -z "${HOSTS//[[:space:]]/}" ]; then
   echo "ERROR: failed to discover hosts via srun; got empty host list."
   echo "SLURM_NNODES=${SLURM_NNODES:-unknown}"
@@ -84,7 +96,7 @@ echo "HOSTS=${HOSTS//$'\n'/,}"
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
 # One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
-srun bash -lc '
+"$SRUN" bash -lc '
   set -euo pipefail
   torchrun \
     --nnodes="$SLURM_NNODES" \
