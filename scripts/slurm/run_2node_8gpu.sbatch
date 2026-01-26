@@ -20,7 +20,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-RUN_DIR="${RUN_DIR:-benchmarks/bigpurple_v100_2026-01-26/8gpu_2node}"
+RUN_DIR_DEFAULT="${REPO_ROOT}/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node"
+RUN_DIR="${RUN_DIR:-$RUN_DIR_DEFAULT}"
+
+echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unknown}"
+echo "REPO_ROOT=$REPO_ROOT"
+echo "PWD=$(pwd)"
+echo "RUN_DIR=$RUN_DIR"
+echo "REPO_ROOT perms:"
+ls -ld "$REPO_ROOT" || true
+echo "RUN_DIR parent perms:"
+ls -ld "$(dirname "$RUN_DIR")" || true
+
 if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   echo "ERROR: cannot create RUN_DIR='$RUN_DIR' (permission denied)."
   echo "Set RUN_DIR to a writable path (e.g. \$SCRATCH/... or \$HOME/...) and resubmit:"
@@ -48,7 +59,7 @@ srun bash -lc '
   torchrun \
     --nnodes="$SLURM_NNODES" \
     --nproc_per_node=4 \
-    --node_rank="$SLURM_NODEID" \
+    --node_rank="$SLURM_PROCID" \
     --rdzv_backend=c10d \
     --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
