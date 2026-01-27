@@ -656,14 +656,6 @@ class GPT2Trainer:
             train_iter = iter(self.train_dataloader)
             total_steps_in_epoch = len(self.train_dataloader)
             for step in range(total_steps_in_epoch):
-                 if dist.is_available() and dist.is_initialized():
-                      if step % 50 == 0:
-                           print(f"[Rank {self.global_rank}] Waiting at barrier: Start of Step {step}, Epoch {epoch+1}")
-                      dist.barrier()
-                      if step % 50 == 0:
-                           print(f"[Rank {self.global_rank}] Passed barrier: Start of Step {step}, Epoch {epoch+1}")
-
-
                  dataload_start = time.perf_counter()
                  try:
                       batch = next(train_iter)
@@ -698,7 +690,6 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during forward pass: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  try:
@@ -715,7 +706,6 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during loss computation: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  try:
@@ -760,7 +750,6 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during backward/step: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  if sample_timing:
@@ -997,7 +986,6 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during validation: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       break
 
         if dist.is_available() and dist.is_initialized():
@@ -1020,11 +1008,6 @@ class GPT2Trainer:
                 val_progress_bar.close()
             self.rank_print(f"Validation Finished Epoch {epoch+1}. Average Loss: {avg_loss:.4f}")
             return avg_loss
-
-        if dist.is_available() and dist.is_initialized():
-             self.rank_print(f"Waiting at barrier after validation, Epoch {epoch+1}...")
-             dist.barrier()
-             self.rank_print(f"Passed barrier after validation, Epoch {epoch+1}.")
         return None
 
 
