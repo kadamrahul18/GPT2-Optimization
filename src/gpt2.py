@@ -119,6 +119,8 @@ def build_launcher_metadata(trainer, checkpoint_path):
 
 
 def clean_distributed_shutdown(global_rank):
+    import threading
+
     try:
         sys.stdout.flush()
         sys.stderr.flush()
@@ -126,43 +128,46 @@ def clean_distributed_shutdown(global_rank):
         pass
 
     if dist.is_available() and dist.is_initialized():
+        timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "30"))
+
         try:
-            timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "120"))
-            backend = None
+            # Best-effort barrier (async) with polling; ignore failures.
+            work = dist.barrier(async_op=True)
+            deadline = time.time() + timeout_sec
+            if hasattr(work, "is_completed"):
+                while time.time() < deadline and not work.is_completed():
+                    time.sleep(0.1)
+            elif hasattr(work, "wait"):
+                # Don't block forever: call wait() in a daemon thread.
+                def _wait():
+                    try:
+                        work.wait()
+                    except Exception:
+                        pass
+
+                t_wait = threading.Thread(target=_wait, daemon=True)
+                t_wait.start()
+                t_wait.join(timeout=timeout_sec)
+        except Exception as e:
+            print(f"[Rank {global_rank}] Warning: shutdown barrier failed: {e}", flush=True)
+
+        def _destroy_pg():
             try:
-                backend = dist.get_backend()
-            except Exception:
-                backend = None
+                dist.destroy_process_group()
+            except Exception as e:
+                print(f"[Rank {global_rank}] Warning: destroy_process_group failed: {e}", flush=True)
 
-            if backend == "gloo" and hasattr(dist, "monitored_barrier"):
-                from datetime import timedelta
-
-                dist.monitored_barrier(timeout=timedelta(seconds=timeout_sec))
-            else:
-                # Best-effort time-bounded barrier to avoid end-of-run hangs.
-                work = dist.barrier(async_op=True)
-                if hasattr(work, "is_completed"):
-                    deadline = time.time() + timeout_sec
-                    while time.time() < deadline and not work.is_completed():
-                        time.sleep(0.1)
-                    if not work.is_completed():
-                        print(
-                            f"[Rank {global_rank}] Warning: shutdown barrier timed out after {timeout_sec}s; "
-                            "continuing with destroy_process_group.",
-                            flush=True,
-                        )
-                else:
-                    # Fall back to a regular barrier if async completion can't be polled.
-                    dist.barrier()
-        except Exception as e:
-            print(f"[Rank {global_rank}] Warning: dist.barrier failed during shutdown: {e}", flush=True)
         try:
-            dist.destroy_process_group()
+            t = threading.Thread(target=_destroy_pg, daemon=True)
+            t.start()
+            t.join(timeout=timeout_sec)
+            if t.is_alive():
+                print(
+                    f"[Rank {global_rank}] Warning: destroy_process_group timed out after {timeout_sec}s; exiting anyway.",
+                    flush=True,
+                )
         except Exception as e:
-            print(
-                f"[Rank {global_rank}] Warning: dist.destroy_process_group failed during shutdown: {e}",
-                flush=True,
-            )
+            print(f"[Rank {global_rank}] Warning: shutdown cleanup failed: {e}", flush=True)
 
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
