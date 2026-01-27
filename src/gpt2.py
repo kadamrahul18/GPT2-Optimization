@@ -129,27 +129,8 @@ def clean_distributed_shutdown(global_rank):
 
     if dist.is_available() and dist.is_initialized():
         timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "30"))
-
-        try:
-            # Best-effort barrier (async) with polling; ignore failures.
-            work = dist.barrier(async_op=True)
-            deadline = time.time() + timeout_sec
-            if hasattr(work, "is_completed"):
-                while time.time() < deadline and not work.is_completed():
-                    time.sleep(0.1)
-            elif hasattr(work, "wait"):
-                # Don't block forever: call wait() in a daemon thread.
-                def _wait():
-                    try:
-                        work.wait()
-                    except Exception:
-                        pass
-
-                t_wait = threading.Thread(target=_wait, daemon=True)
-                t_wait.start()
-                t_wait.join(timeout=timeout_sec)
-        except Exception as e:
-            print(f"[Rank {global_rank}] Warning: shutdown barrier failed: {e}", flush=True)
+        # NOTE: Do not call dist.barrier() during shutdown. If any rank is delayed (e.g., profiler flush),
+        # an in-flight barrier/allreduce can trigger the NCCL watchdog and abort the process.
 
         def _destroy_pg():
             try:
