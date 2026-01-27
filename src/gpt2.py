@@ -167,13 +167,12 @@ class PositionalEmbedding(nn.Module):
         return self.position_embeddings(position_ids)
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, embedding_size, num_heads, dropout, use_flash_attention=False):
+    def __init__(self, embedding_size, num_heads, dropout):
         super(MultiHeadSelfAttention, self).__init__()
         assert embedding_size % num_heads == 0, "Embedding size must be divisible by num_heads"
 
         self.num_heads = num_heads
         self.head_dim = embedding_size // num_heads
-        self.use_flash_attention = use_flash_attention
         self.embedding_size = embedding_size
 
         self.query = nn.Linear(embedding_size, embedding_size)
@@ -193,22 +192,14 @@ class MultiHeadSelfAttention(nn.Module):
         K = K.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
 
-        if self.use_flash_attention:
-            try:
-                from FlashAttention import attention
-                sm_scale = 1.0 / math.sqrt(self.head_dim)
-                attn_output = attention(Q.contiguous(), K.contiguous(), V.contiguous(), True, sm_scale)
-            except ImportError:
-                 raise ImportError("FlashAttention not found or installed correctly. Cannot use use_flash_attention=True.")
-        else:
-            attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
 
-            attn_weights = torch.softmax(attn_weights, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, V)
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        attn_output = torch.matmul(attn_weights, V)
 
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_length, embed_dim)
         output = self.out(attn_output)
@@ -229,10 +220,10 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embedding_size, num_heads, dropout, use_flash_attention):
+    def __init__(self, embedding_size, num_heads, dropout):
         super(TransformerBlock, self).__init__()
         self.ln1 = nn.LayerNorm(embedding_size, eps=1e-5)
-        self.attn = MultiHeadSelfAttention(embedding_size, num_heads, dropout, use_flash_attention)
+        self.attn = MultiHeadSelfAttention(embedding_size, num_heads, dropout)
         self.ln2 = nn.LayerNorm(embedding_size, eps=1e-5)
         self.ffn = FeedForward(embedding_size, dropout)
 
@@ -242,16 +233,15 @@ class TransformerBlock(nn.Module):
         return x
 
 class GPT2Model(nn.Module):
-    def __init__(self, vocab_size, embedding_size, num_layers, num_heads, dropout, max_position_embeddings, use_flash_attention=False):
+    def __init__(self, vocab_size, embedding_size, num_layers, num_heads, dropout, max_position_embeddings):
         super(GPT2Model, self).__init__()
         self.token_embedding = TokenEmbedding(vocab_size, embedding_size)
         self.position_embedding = PositionalEmbedding(max_position_embeddings, embedding_size)
         self.dropout = nn.Dropout(dropout)
         self.max_position_embeddings = max_position_embeddings
-        self.use_flash_attention = use_flash_attention
 
         self.blocks = nn.ModuleList([
-            TransformerBlock(embedding_size, num_heads, dropout, use_flash_attention) for _ in range(num_layers)
+            TransformerBlock(embedding_size, num_heads, dropout) for _ in range(num_layers)
         ])
 
         self.ln_f = nn.LayerNorm(embedding_size, eps=1e-5)
@@ -268,11 +258,11 @@ class GPT2Model(nn.Module):
         hidden_states = token_embeddings + position_embeddings
         hidden_states = self.dropout(hidden_states)
 
-        if attention_mask is None and not self.use_flash_attention:
-             mask = torch.tril(torch.ones((seq_length, seq_length), dtype=torch.bool, device=input_ids.device))
-             attention_mask = mask.unsqueeze(0).unsqueeze(0)
-             attention_mask = attention_mask.to(dtype=hidden_states.dtype)
-             attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
+        if attention_mask is None:
+            mask = torch.tril(torch.ones((seq_length, seq_length), dtype=torch.bool, device=input_ids.device))
+            attention_mask = mask.unsqueeze(0).unsqueeze(0)
+            attention_mask = attention_mask.to(dtype=hidden_states.dtype)
+            attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
 
         
         for block in self.blocks:
@@ -401,7 +391,6 @@ class GPT2Trainer:
             num_heads=args.num_heads,
             dropout=args.dropout,
             max_position_embeddings=args.max_position_embeddings,
-            use_flash_attention=args.use_flash_attention if hasattr(args, 'use_flash_attention') else False
         )
         self.rank_print("GPT-2 Model Initialized.")
 
@@ -1114,9 +1103,6 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--max_position_embeddings', type=int, default=1024, help='Maximum sequence length model can handle')
     parser.add_argument('--seq_length', type=int, default=512, help='Sequence length for training data chunks')
-    parser.add_argument('--use_flash_attention', action='store_true', help='Use FlashAttention implementation')
-
-
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=4, help='Micro batch size per GPU (overridden by deepspeed config)')
     parser.add_argument('--micro_batch_size_per_gpu', type=int, default=None, help='Override micro batch size per GPU')
