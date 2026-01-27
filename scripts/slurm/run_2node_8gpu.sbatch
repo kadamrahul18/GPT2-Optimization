@@ -197,6 +197,7 @@ fi
   if [[ "$TORCHRUN_LOGS" == "1" ]]; then
     TORCHRUN_LOG_ARGS="--tee 3 --log_dir $TORCHRUN_LOG_DIR"
   fi
+  EXTRA_ARGS="${GPT2_EXTRA_ARGS:-}"
   NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
   NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
 
@@ -231,7 +232,8 @@ fi
         --seq_length 512 \
         --micro_batch_size_per_gpu 2 \
         --grad_accum_steps 1 \
-        --deepspeed_config src/deepspeed_config.json
+        --deepspeed_config src/deepspeed_config.json \
+        $EXTRA_ARGS
 
     if [ -f "${NSYS_REP}" ]; then
       STATS_OUT="$RUN_DIR/profiles/nsys_stats_${HOST}.txt"
@@ -260,7 +262,8 @@ fi
       --seq_length 512 \
       --micro_batch_size_per_gpu 2 \
       --grad_accum_steps 1 \
-      --deepspeed_config src/deepspeed_config.json
+      --deepspeed_config src/deepspeed_config.json \
+      $EXTRA_ARGS
   fi
 '
 

@@ -16,6 +16,7 @@ import copy
 import torch.distributed as dist
 import tiktoken
 import metrics as metrics_utils
+from contextlib import contextmanager
 
 from transformers import GPT2Tokenizer
 
@@ -339,6 +340,7 @@ class GPT2Trainer:
         self.log_interval = args.steps_per_print
         self.debug_collectives = os.getenv("DIST_DEBUG", "0") == "1"
         self.collective_seq = 0
+        self.profile_mode = bool(getattr(args, "profile_mode", False)) or os.getenv("PROFILE_MODE", "0") == "1"
 
         self.local_rank, self.global_rank, self.world_size = get_dist_info(args)
         if torch.cuda.is_available():
@@ -449,6 +451,24 @@ class GPT2Trainer:
             self.debug_print(f"COLL_EXIT  seq={seq} op=all_reduce tag={tag}")
 
         self.dist_all_reduce = dist_all_reduce
+
+        @contextmanager
+        def nvtx_range(name: str):
+            if self.profile_mode and torch.cuda.is_available():
+                try:
+                    torch.cuda.nvtx.range_push(name)
+                except Exception:
+                    pass
+            try:
+                yield
+            finally:
+                if self.profile_mode and torch.cuda.is_available():
+                    try:
+                        torch.cuda.nvtx.range_pop()
+                    except Exception:
+                        pass
+
+        self.nvtx_range = nvtx_range
 
         self.rank_print(f"Initializing GPT2Trainer on Global Rank {self.global_rank}, Local Rank {self.local_rank}, World Size {self.world_size}, Device {self.current_device}")
 
@@ -708,7 +728,8 @@ class GPT2Trainer:
 
             progress_bar = None
             if self.global_rank == 0:
-                 progress_bar = tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{self.args.epochs} Rank 0")
+                 if not self.profile_mode:
+                      progress_bar = tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{self.args.epochs} Rank 0")
 
 
             total_train_loss_epoch = 0.0
@@ -717,8 +738,9 @@ class GPT2Trainer:
             step_time_samples = []
             dataload_time_samples = []
             cuda_step_time_samples = []
-            timing_warmup_steps = 5
-            timing_sample_every = 50
+            cuda_step_event_pairs = []
+            timing_warmup_steps = int(getattr(self.args, "timing_warmup_steps", 5))
+            timing_sample_every = int(getattr(self.args, "timing_sample_every", 50))
 
             if dist.is_available() and dist.is_initialized():
                  self.rank_print(f"Waiting at barrier: Start of Epoch {epoch+1} loop...")
@@ -728,12 +750,15 @@ class GPT2Trainer:
 
             train_iter = iter(self.train_dataloader)
             total_steps_in_epoch = len(self.train_dataloader)
+            if getattr(self.args, "max_train_steps", None) is not None:
+                total_steps_in_epoch = min(total_steps_in_epoch, int(self.args.max_train_steps))
             for step in range(total_steps_in_epoch):
                  dataload_start = time.perf_counter()
-                 try:
-                      batch = next(train_iter)
-                 except StopIteration:
-                      break
+                 with self.nvtx_range("train/dataload"):
+                     try:
+                          batch = next(train_iter)
+                     except StopIteration:
+                          break
                  dataload_end = time.perf_counter()
                  input_ids, targets = batch
                  input_ids = input_ids.to(self.current_device)
@@ -750,15 +775,12 @@ class GPT2Trainer:
                       step_start = time.perf_counter()
                       if start_event is not None:
                            start_event.record()
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting forward pass, Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
-                      if self.use_deepspeed:
-                           outputs = self.model_engine(*inputs)
-                      else:
-                           with torch.cuda.amp.autocast(enabled=self.use_amp):
+                      with self.nvtx_range("train/forward"):
+                           if self.use_deepspeed:
                                 outputs = self.model_engine(*inputs)
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed forward pass, Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
+                           else:
+                                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                                     outputs = self.model_engine(*inputs)
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during forward pass: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
@@ -767,13 +789,12 @@ class GPT2Trainer:
 
                  try:
                       outputs = outputs.contiguous()
-                      loss = F.cross_entropy(
-                          outputs.view(-1, self.args.vocab_size), targets.view(-1)
-                      )
+                      with self.nvtx_range("train/loss"):
+                           loss = F.cross_entropy(
+                               outputs.view(-1, self.args.vocab_size), targets.view(-1)
+                           )
                       batch_loss = loss.item()
                       batch_tokens = input_ids.numel()
-                      if step % 50 == 0 or step < 5:
-                          print(f"[Rank {self.global_rank}]: Computed loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during loss computation: Step {step}, Epoch {epoch+1}: {e}")
@@ -782,39 +803,33 @@ class GPT2Trainer:
                       sys.exit(1)
 
                  try:
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting backward pass, Step {step}, Epoch {epoch+1}")
-                      if self.use_deepspeed:
-                           self.model_engine.backward(loss)
-                      else:
-                           loss_to_backprop = loss / max(1, self.grad_accum_steps)
-                           if self.use_amp:
-                                self.scaler.scale(loss_to_backprop).backward()
+                      with self.nvtx_range("train/backward"):
+                           if self.use_deepspeed:
+                                self.model_engine.backward(loss)
                            else:
-                                loss_to_backprop.backward()
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed backward pass, Step {step}, Epoch {epoch+1}")
-
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting optimizer step, Step {step}, Epoch {epoch+1}")
-                      if self.use_deepspeed:
-                           self.model_engine.step()
-                      else:
-                           should_step = ((step + 1) % max(1, self.grad_accum_steps) == 0) or (step + 1 == total_steps_in_epoch)
-                           if should_step:
-                                grad_clip = self.deepspeed_config.get("gradient_clipping")
-                                if grad_clip:
-                                     if self.use_amp:
-                                          self.scaler.unscale_(self.optimizer)
-                                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                                loss_to_backprop = loss / max(1, self.grad_accum_steps)
                                 if self.use_amp:
-                                     self.scaler.step(self.optimizer)
-                                     self.scaler.update()
+                                     self.scaler.scale(loss_to_backprop).backward()
                                 else:
-                                     self.optimizer.step()
-                                self.optimizer.zero_grad(set_to_none=True)
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed optimizer step, Step {step}, Epoch {epoch+1}")
+                                     loss_to_backprop.backward()
+
+                      with self.nvtx_range("train/optimizer_step"):
+                           if self.use_deepspeed:
+                                self.model_engine.step()
+                           else:
+                                should_step = ((step + 1) % max(1, self.grad_accum_steps) == 0) or (step + 1 == total_steps_in_epoch)
+                                if should_step:
+                                     grad_clip = self.deepspeed_config.get("gradient_clipping")
+                                     if grad_clip:
+                                          if self.use_amp:
+                                               self.scaler.unscale_(self.optimizer)
+                                          torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                                     if self.use_amp:
+                                          self.scaler.step(self.optimizer)
+                                          self.scaler.update()
+                                     else:
+                                          self.optimizer.step()
+                                     self.optimizer.zero_grad(set_to_none=True)
                       if end_event is not None:
                            end_event.record()
                       step_end = time.perf_counter()
@@ -829,9 +844,7 @@ class GPT2Trainer:
                       step_time_samples.append(step_end - step_start)
                       dataload_time_samples.append(dataload_end - dataload_start)
                       if start_event is not None and end_event is not None:
-                           torch.cuda.synchronize()
-                           cuda_ms = start_event.elapsed_time(end_event)
-                           cuda_step_time_samples.append(cuda_ms / 1000.0)
+                           cuda_step_event_pairs.append((start_event, end_event))
 
                  total_train_loss_epoch += batch_loss * batch_tokens
                  num_tokens_processed_epoch += batch_tokens
@@ -843,19 +856,27 @@ class GPT2Trainer:
                            progress_bar.set_postfix(loss=batch_loss)
 
                       if step % self.log_interval == 0:
-                           try:
-                                memory_stats = torch.cuda.memory_stats(self.current_device)
-                                peak_memory_mb = memory_stats.get("allocated_bytes.all.peak", 0) / (1024**2)
-                                current_memory_mb = memory_stats.get("allocated_bytes.all.current", 0) / (1024**2)
-                                self.rank_print(f"Step {step}, Loss: {batch_loss:.4f}, Mem Curr: {current_memory_mb:.2f}MB, Mem Peak: {peak_memory_mb:.2f}MB")
-                                if step == 0 and epoch == 0:
-                                      torch.cuda.reset_peak_memory_stats(self.current_device)
-                                      self.rank_print("Reset peak memory stats after first step.")
-                           except Exception as mem_e:
-                                self.rank_print(f"Warning: Could not get memory stats: {mem_e}")
+                           if not self.profile_mode:
+                                try:
+                                     memory_stats = torch.cuda.memory_stats(self.current_device)
+                                     peak_memory_mb = memory_stats.get("allocated_bytes.all.peak", 0) / (1024**2)
+                                     current_memory_mb = memory_stats.get("allocated_bytes.all.current", 0) / (1024**2)
+                                     self.rank_print(f"Step {step}, Loss: {batch_loss:.4f}, Mem Curr: {current_memory_mb:.2f}MB, Mem Peak: {peak_memory_mb:.2f}MB")
+                                     if step == 0 and epoch == 0:
+                                           torch.cuda.reset_peak_memory_stats(self.current_device)
+                                           self.rank_print("Reset peak memory stats after first step.")
+                                except Exception as mem_e:
+                                     self.rank_print(f"Warning: Could not get memory stats: {mem_e}")
 
                  if prof:
                       prof.step()
+
+            if self.global_rank == 0 and cuda_step_event_pairs and torch.cuda.is_available():
+                # Avoid per-sample cudaEventSynchronize() overhead: synchronize once, then read all event durations.
+                torch.cuda.synchronize()
+                for start_event, end_event in cuda_step_event_pairs:
+                    cuda_ms = start_event.elapsed_time(end_event)
+                    cuda_step_time_samples.append(cuda_ms / 1000.0)
 
             if dist.is_available() and dist.is_initialized():
                 self.dist_barrier(f"epoch_{epoch+1}_train_loop_end")
@@ -1022,10 +1043,13 @@ class GPT2Trainer:
 
         val_progress_bar = None
         if self.global_rank == 0:
-             val_progress_bar = tqdm(total=len(self.val_dataloader), desc=f"Validation Epoch {epoch+1} Rank 0")
+             if not self.profile_mode:
+                  val_progress_bar = tqdm(total=len(self.val_dataloader), desc=f"Validation Epoch {epoch+1} Rank 0")
 
         with torch.no_grad():
             for step, batch in enumerate(self.val_dataloader):
+                 if getattr(self.args, "max_val_steps", None) is not None and step >= int(self.args.max_val_steps):
+                      break
 
                  input_ids, targets = batch
                  input_ids = input_ids.to(self.current_device)
@@ -1033,21 +1057,18 @@ class GPT2Trainer:
                  inputs = (input_ids, None)
 
                  try:
-                      if step % 20 == 0 or step < 3:
-                          print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
                       if self.use_deepspeed:
-                           outputs = self.model_engine(*inputs)
+                           with self.nvtx_range("val/forward"):
+                                outputs = self.model_engine(*inputs)
                       else:
                            with torch.cuda.amp.autocast(enabled=self.use_amp):
-                                outputs = self.model_engine(*inputs)
-                      if step % 20 == 0 or step < 3:
-                          print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
+                                with self.nvtx_range("val/forward"):
+                                     outputs = self.model_engine(*inputs)
 
-                      loss = F.cross_entropy(outputs.view(-1, self.args.vocab_size), targets.view(-1))
+                      with self.nvtx_range("val/loss"):
+                           loss = F.cross_entropy(outputs.view(-1, self.args.vocab_size), targets.view(-1))
                       batch_loss = loss.item()
                       batch_tokens = input_ids.numel()
-                      if step % 20 == 0 or step < 3:
-                           print(f"[Rank {self.global_rank}]: Validation Loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
                       total_loss_sum += batch_loss * batch_tokens
                       total_tokens += batch_tokens
@@ -1186,6 +1207,11 @@ def main():
     # parser.add_argument('--pipeline_stages', type=int, default=1, help='Number of pipeline stages (overridden by deepspeed config)')
 
     parser.add_argument('--profile', action='store_true', help='Enable PyTorch profiler (logs saved in checkpoint_path/profiler_logs)')
+    parser.add_argument('--profile_mode', action='store_true', help='Enable profiling-friendly behavior (throttled logging, NVTX ranges)')
+    parser.add_argument('--max_train_steps', type=int, default=None, help='Limit training micro-steps per epoch (useful for profiling)')
+    parser.add_argument('--max_val_steps', type=int, default=None, help='Limit validation steps per epoch (useful for profiling)')
+    parser.add_argument('--timing_warmup_steps', type=int, default=5, help='Warmup steps before timing samples')
+    parser.add_argument('--timing_sample_every', type=int, default=50, help='Sample step timing every N steps')
     parser.add_argument('--num_workers', type=int, default=None, help='DataLoader worker processes (default: 0 for distributed, 2 otherwise)')
 
 
