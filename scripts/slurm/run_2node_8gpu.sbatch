@@ -116,6 +116,7 @@ def main():
     local_rank = parse_local_rank(sys.argv[1:])
     if local_rank is None:
         local_rank = 0
+    node_id = int(os.environ.get("SLURM_NODEID", "0") or "0")
 
     repo_root = os.environ.get("REPO_ROOT", os.getcwd())
     nsys_bin = os.environ.get("NSYS_BIN")
@@ -123,7 +124,8 @@ def main():
 
     cmd = [sys.executable, "-u", os.path.join(repo_root, "src", "gpt2.py"), *sys.argv[1:]]
 
-    if local_rank == 0:
+    # Profile only one rank on one node to keep overhead bounded and avoid end-of-job stalls.
+    if local_rank == 0 and node_id == 0:
         if not nsys_bin or not os.path.exists(nsys_bin):
             raise SystemExit("NSYS=1 but NSYS_BIN is missing/unset in environment")
         nsys_cmd = [nsys_bin, *nsys_args.split(), *cmd]
