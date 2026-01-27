@@ -198,6 +198,8 @@ fi
     TORCHRUN_LOG_ARGS="--tee 3 --log_dir $TORCHRUN_LOG_DIR"
   fi
   EXTRA_ARGS="${GPT2_EXTRA_ARGS:-}"
+  MICRO_BATCH_SIZE_PER_GPU="${MICRO_BATCH_SIZE_PER_GPU:-2}"
+  GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
   NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
   NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
 
@@ -230,8 +232,8 @@ fi
         --checkpoint_path "'"$RUN_DIR"'" \
         --epochs 1 \
         --seq_length 512 \
-        --micro_batch_size_per_gpu 2 \
-        --grad_accum_steps 1 \
+        --micro_batch_size_per_gpu "${MICRO_BATCH_SIZE_PER_GPU}" \
+        --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
         --deepspeed_config src/deepspeed_config.json \
         $EXTRA_ARGS
 
@@ -260,8 +262,8 @@ fi
       --checkpoint_path "'"$RUN_DIR"'" \
       --epochs 1 \
       --seq_length 512 \
-      --micro_batch_size_per_gpu 2 \
-      --grad_accum_steps 1 \
+      --micro_batch_size_per_gpu "${MICRO_BATCH_SIZE_PER_GPU}" \
+      --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
       --deepspeed_config src/deepspeed_config.json \
       $EXTRA_ARGS
   fi
