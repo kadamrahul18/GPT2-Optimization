@@ -97,8 +97,11 @@ if [[ "${NSYS:-0}" == "1" ]]; then
     echo "ERROR: NSYS=1 but NSYS_BIN is not executable: $NSYS_BIN"
     exit 1
   fi
-  # Nsight Systems writes intermediate streams to /tmp by default; on some nodes /tmp can be constrained.
-  export TMPDIR="${SLURM_TMPDIR:-$RUN_DIR/profiles/tmp}"
+  # Nsight Systems (and Python multiprocessing) may use TMPDIR for AF_UNIX sockets; keep it short to avoid
+  # "OSError: AF_UNIX path too long" during multi-process training.
+  export TMPDIR="${SLURM_TMPDIR:-$REPO_ROOT/.tmp}"
+  export TMP="$TMPDIR"
+  export TEMP="$TMPDIR"
   mkdir -p "$TMPDIR"
 fi
 # --- End Nsight Systems toggles ---
