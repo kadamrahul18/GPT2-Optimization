@@ -82,6 +82,7 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
 fi
 
 mkdir -p "$RUN_DIR/profiles"
+mkdir -p "$RUN_DIR/torchrun_logs"
 
 # --- Nsight Systems toggles (NSYS=1) ---
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt}"
@@ -123,10 +124,24 @@ if [[ "${NCCL_LOGS:-0}" == "1" ]]; then
   export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
   export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
   export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+  export NCCL_ASYNC_ERROR_HANDLING=1
   export NCCL_IB_HCA=mlx5_0
   export NCCL_SOCKET_IFNAME=^lo,docker0
 fi
 # --- End optional NCCL debug ---
+
+#
+# Optional distributed debug (collective trace + better stack traces).
+# Enable via:
+#   DIST_DEBUG=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
+#
+if [[ "${DIST_DEBUG:-0}" == "1" ]]; then
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export TORCH_SHOW_CPP_STACKTRACES=1
+  export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
+  export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-33554432}"
+fi
 
 HOSTS="$("$SRUN" --export=ALL --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
 if [ -z "${HOSTS//[[:space:]]/}" ]; then
@@ -175,6 +190,13 @@ fi
   python -V
 
   HOST="$(hostname)"
+  TORCHRUN_LOG_DIR="$RUN_DIR/torchrun_logs"
+  mkdir -p "$TORCHRUN_LOG_DIR"
+  TORCHRUN_LOGS="${TORCHRUN_LOGS:-1}"
+  TORCHRUN_LOG_ARGS=""
+  if [[ "$TORCHRUN_LOGS" == "1" ]]; then
+    TORCHRUN_LOG_ARGS="--tee 3 --log_dir $TORCHRUN_LOG_DIR"
+  fi
   NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
   NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
 
@@ -199,6 +221,7 @@ fi
         --rdzv_backend=c10d \
         --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
         --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+        $TORCHRUN_LOG_ARGS \
         src/gpt2.py \
         --run_type optimized \
         --train_data_path train_small.bin \
@@ -227,6 +250,7 @@ fi
       --rdzv_backend=c10d \
       --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
       --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+      $TORCHRUN_LOG_ARGS \
       src/gpt2.py \
       --run_type optimized \
       --train_data_path train_small.bin \

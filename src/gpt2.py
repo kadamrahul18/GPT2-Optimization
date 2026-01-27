@@ -128,13 +128,18 @@ def clean_distributed_shutdown(global_rank):
         pass
 
     if dist.is_available() and dist.is_initialized():
+        dist_debug = os.getenv("DIST_DEBUG", "0") == "1"
         timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "30"))
         # NOTE: Do not call dist.barrier() during shutdown. If any rank is delayed (e.g., profiler flush),
         # an in-flight barrier/allreduce can trigger the NCCL watchdog and abort the process.
 
         def _destroy_pg():
             try:
+                if dist_debug:
+                    print(f"[Rank {global_rank}] SHUTDOWN_ENTER destroy_process_group", flush=True)
                 dist.destroy_process_group()
+                if dist_debug:
+                    print(f"[Rank {global_rank}] SHUTDOWN_EXIT  destroy_process_group", flush=True)
             except Exception as e:
                 print(f"[Rank {global_rank}] Warning: destroy_process_group failed: {e}", flush=True)
 
@@ -332,6 +337,8 @@ class GPT2Trainer:
         self.args = args
         self.start_epoch = 0
         self.log_interval = args.steps_per_print
+        self.debug_collectives = os.getenv("DIST_DEBUG", "0") == "1"
+        self.collective_seq = 0
 
         self.local_rank, self.global_rank, self.world_size = get_dist_info(args)
         if torch.cuda.is_available():
@@ -380,6 +387,68 @@ class GPT2Trainer:
                 print(f"[Rank {self.global_rank}]", *print_args, **kwargs)
 
         self.rank_print = rank_print
+        self.debug_log_path = None
+        self._debug_log_fh = None
+        if self.debug_collectives:
+            try:
+                log_dir = os.path.join(self.args.checkpoint_path, "rank_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                self.debug_log_path = os.path.join(log_dir, f"rank{self.global_rank}.log")
+                self._debug_log_fh = open(self.debug_log_path, "a", encoding="utf-8")
+            except Exception:
+                self._debug_log_fh = None
+
+        def debug_print(*print_args, **kwargs):
+            if not self.debug_collectives:
+                return
+            msg = " ".join(str(x) for x in print_args)
+            prefix = f"[Rank {self.global_rank}]"
+            print(prefix, msg, flush=True, **kwargs)
+            if self._debug_log_fh is not None:
+                try:
+                    self._debug_log_fh.write(prefix + " " + msg + "\n")
+                    self._debug_log_fh.flush()
+                except Exception:
+                    pass
+
+        self.debug_print = debug_print
+
+        def next_collective_seq():
+            self.collective_seq += 1
+            return self.collective_seq
+
+        self.next_collective_seq = next_collective_seq
+
+        def dist_ready():
+            return dist.is_available() and dist.is_initialized()
+
+        self.dist_ready = dist_ready
+
+        def dist_barrier(tag):
+            if not self.dist_ready():
+                return
+            seq = self.next_collective_seq()
+            self.debug_print(f"COLL_ENTER seq={seq} op=barrier tag={tag}")
+            dist.barrier()
+            self.debug_print(f"COLL_EXIT  seq={seq} op=barrier tag={tag}")
+
+        self.dist_barrier = dist_barrier
+
+        def dist_all_reduce(tensor, op, tag):
+            if not self.dist_ready():
+                return
+            seq = self.next_collective_seq()
+            try:
+                shape = tuple(tensor.shape)
+            except Exception:
+                shape = "unknown"
+            self.debug_print(
+                f"COLL_ENTER seq={seq} op=all_reduce tag={tag} dtype={getattr(tensor, 'dtype', 'unknown')} shape={shape}"
+            )
+            dist.all_reduce(tensor, op=op)
+            self.debug_print(f"COLL_EXIT  seq={seq} op=all_reduce tag={tag}")
+
+        self.dist_all_reduce = dist_all_reduce
 
         self.rank_print(f"Initializing GPT2Trainer on Global Rank {self.global_rank}, Local Rank {self.local_rank}, World Size {self.world_size}, Device {self.current_device}")
 
@@ -535,7 +604,7 @@ class GPT2Trainer:
 
         if dist.is_available() and dist.is_initialized():
              self.rank_print("Waiting at barrier after DeepSpeed initialization...")
-             dist.barrier()
+             self.dist_barrier("post_deepspeed_init")
              self.rank_print("Passed barrier after DeepSpeed initialization.")
 
         if len(self.val_dataset) > 0:
@@ -559,6 +628,10 @@ class GPT2Trainer:
         else:
              self.rank_print("Validation dataset is empty, skipping validation dataloader creation.")
              self.val_dataloader = None
+        if self.debug_collectives and self.dist_ready():
+            val_len = len(self.val_dataloader) if self.val_dataloader is not None else -1
+            train_len = len(self.train_dataloader) if self.train_dataloader is not None else -1
+            self.debug_print(f"DATA_INFO train_dataloader_len={train_len} val_dataloader_len={val_len}")
 
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.metrics = metrics_utils.build_initial_metrics(
@@ -607,7 +680,7 @@ class GPT2Trainer:
 
         if dist.is_available() and dist.is_initialized():
             self.rank_print("Waiting at barrier before training loop...")
-            dist.barrier()
+            self.dist_barrier("pre_training_loop")
             self.rank_print("Passed barrier, entering training loop.")
 
         if self.global_rank == 0:
@@ -616,7 +689,7 @@ class GPT2Trainer:
         for epoch in range(self.start_epoch, self.args.epochs):
             self.rank_print(f"Starting Epoch {epoch + 1}/{self.args.epochs}")
             if dist.is_available() and dist.is_initialized():
-                 dist.barrier()
+                 self.dist_barrier(f"epoch_{epoch+1}_start")
 
             if torch.cuda.is_available():
                  torch.cuda.reset_peak_memory_stats(self.current_device)
@@ -649,7 +722,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                  self.rank_print(f"Waiting at barrier: Start of Epoch {epoch+1} loop...")
-                 dist.barrier()
+                 self.dist_barrier(f"epoch_{epoch+1}_loop_start")
                  self.rank_print(f"Passed barrier: Start of Epoch {epoch+1} loop.")
 
 
@@ -785,7 +858,7 @@ class GPT2Trainer:
                       prof.step()
 
             if dist.is_available() and dist.is_initialized():
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_train_loop_end")
 
             if dist.is_available() and dist.is_initialized():
                 loss_tokens = torch.tensor(
@@ -793,13 +866,13 @@ class GPT2Trainer:
                     device=self.current_device,
                     dtype=torch.float64,
                 )
-                dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+                self.dist_all_reduce(loss_tokens, op=dist.ReduceOp.SUM, tag=f"epoch_{epoch+1}_train_loss_tokens_sum")
                 steps_tensor = torch.tensor(
                     [num_steps_epoch],
                     device=self.current_device,
                     dtype=torch.float64,
                 )
-                dist.all_reduce(steps_tensor, op=dist.ReduceOp.MAX)
+                self.dist_all_reduce(steps_tensor, op=dist.ReduceOp.MAX, tag=f"epoch_{epoch+1}_train_steps_max")
                 global_steps = int(steps_tensor.item())
                 global_loss_sum = loss_tokens[0].item()
                 global_tokens = loss_tokens[1].item()
@@ -821,7 +894,7 @@ class GPT2Trainer:
                         device=self.current_device,
                         dtype=torch.float64,
                     )
-                    dist.all_reduce(mem_tensor, op=dist.ReduceOp.MAX)
+                    self.dist_all_reduce(mem_tensor, op=dist.ReduceOp.MAX, tag=f"epoch_{epoch+1}_mem_max")
                     max_alloc_global = int(mem_tensor[0].item())
                     max_reserved_global = int(mem_tensor[1].item())
 
@@ -873,7 +946,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier before validation, Epoch {epoch+1}...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_pre_validation")
                 self.rank_print(f"Passed barrier, starting validation, Epoch {epoch+1}.")
 
             if self.val_dataloader:
@@ -886,7 +959,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier before checkpointing, Epoch {epoch+1}...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_pre_checkpoint")
                 self.rank_print(f"Passed barrier, proceeding with checkpointing, Epoch {epoch+1}.")
 
             if self.global_rank == 0:
@@ -907,7 +980,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier: End of Epoch {epoch+1} processing...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_end")
                 self.rank_print(f"Passed barrier: End of Epoch {epoch+1} processing.")
 
 
@@ -994,7 +1067,7 @@ class GPT2Trainer:
                 device=self.current_device,
                 dtype=torch.float64,
             )
-            dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+            self.dist_all_reduce(loss_tokens, op=dist.ReduceOp.SUM, tag=f"epoch_{epoch+1}_val_loss_tokens_sum")
             global_loss_sum = loss_tokens[0].item()
             global_tokens = loss_tokens[1].item()
         else:
