@@ -35,7 +35,9 @@ echo "SRUN=$SRUN"
 # Replace `deepspeed` if your env name differs.
 if command -v module >/dev/null 2>&1; then
   module purge
-  module load cuda/12.9
+  if [[ "${NSYS:-0}" == "1" || "${NCU:-0}" == "1" ]]; then
+    module load cuda/12.9
+  fi
   # Some module systems reset PATH; keep Slurm tools available.
   export PATH="$(dirname "$SRUN"):$PATH"
 fi
@@ -79,8 +81,13 @@ if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
   exit 1
 fi
 
-# --- Nsight Systems (NSYS=1) ---
 mkdir -p "$RUN_DIR/profiles"
+
+# --- Nsight Systems toggles (NSYS=1) ---
+export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt}"
+export NSYS_CUDA_EVENT_TRACE="${NSYS_CUDA_EVENT_TRACE:-false}"
+export NSYS_SAMPLE="${NSYS_SAMPLE:-none}"
+export NSYS_FORCE_OVERWRITE="${NSYS_FORCE_OVERWRITE:-true}"
 if [[ "${NSYS:-0}" == "1" ]]; then
   if command -v module >/dev/null 2>&1; then
     module load cuda/12.9
@@ -93,57 +100,8 @@ if [[ "${NSYS:-0}" == "1" ]]; then
   # Nsight Systems writes intermediate streams to /tmp by default; on some nodes /tmp can be constrained.
   export TMPDIR="${SLURM_TMPDIR:-$RUN_DIR/profiles/tmp}"
   mkdir -p "$TMPDIR"
-  export NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_%h"
-  export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --cuda-event-trace=false --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
-  NSYS_WRAPPER="$RUN_DIR/profiles/nsys_wrapper.py"
-  cat >"$NSYS_WRAPPER" <<'PY'
-import os
-import subprocess
-import sys
-
-
-def parse_local_rank(argv):
-    env_local_rank = os.environ.get("LOCAL_RANK")
-    if env_local_rank is not None:
-        return int(env_local_rank)
-    for arg in argv:
-        if arg.startswith("--local_rank=") or arg.startswith("--local-rank="):
-            return int(arg.split("=", 1)[1])
-    return None
-
-
-def main():
-    local_rank = parse_local_rank(sys.argv[1:])
-    if local_rank is None:
-        local_rank = 0
-    node_id = int(os.environ.get("SLURM_NODEID", "0") or "0")
-
-    repo_root = os.environ.get("REPO_ROOT", os.getcwd())
-    nsys_bin = os.environ.get("NSYS_BIN")
-    nsys_args = os.environ.get("NSYS_ARGS", "")
-
-    cmd = [sys.executable, "-u", os.path.join(repo_root, "src", "gpt2.py"), *sys.argv[1:]]
-
-    # Profile only one rank on one node to keep overhead bounded and avoid end-of-job stalls.
-    if local_rank == 0 and node_id == 0:
-        if not nsys_bin or not os.path.exists(nsys_bin):
-            raise SystemExit("NSYS=1 but NSYS_BIN is missing/unset in environment")
-        nsys_cmd = [nsys_bin, *nsys_args.split(), *cmd]
-        proc = subprocess.run(nsys_cmd, cwd=repo_root)
-        raise SystemExit(proc.returncode)
-
-    proc = subprocess.run(cmd, cwd=repo_root)
-    raise SystemExit(proc.returncode)
-
-
-if __name__ == "__main__":
-    main()
-PY
-  export NSYS_WRAPPER
-else
-  export NSYS_ARGS=""
 fi
-# --- End NSYS setup ---
+# --- End Nsight Systems toggles ---
 
 # --- Optional NCCL debug + topology artifacts (written under RUN_DIR) ---
 # Enable once when needed:
@@ -203,40 +161,79 @@ fi
 # One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
 "$SRUN" --export=ALL bash -lc '
   set -euo pipefail
+  if [[ "${NSYS:-0}" == "1" || "${NCU:-0}" == "1" ]]; then
+    if command -v module >/dev/null 2>&1; then
+      module load cuda/12.9
+    fi
+  fi
   source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
   conda activate deepspeed
   echo "[srun] which python: $(which python)"
   python -V
 
-  TRAIN_SCRIPT="src/gpt2.py"
-  if [[ "${NSYS:-0}" == "1" ]]; then
-    TRAIN_SCRIPT="${NSYS_WRAPPER}"
-  fi
+  HOST="$(hostname)"
+  NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
+  NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
 
-  python -m torch.distributed.run \
-    --nnodes="$SLURM_NNODES" \
-    --nproc_per_node=4 \
-    --node_rank="$SLURM_PROCID" \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
-    --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
-    "$TRAIN_SCRIPT" \
-    --run_type optimized \
-    --train_data_path train_small.bin \
-    --val_data_path val_small.bin \
-    --checkpoint_path "'"$RUN_DIR"'" \
-    --epochs 1 \
-    --seq_length 512 \
-    --micro_batch_size_per_gpu 2 \
-    --grad_accum_steps 1 \
-    --deepspeed_config src/deepspeed_config.json
+  if [[ "${NSYS:-0}" == "1" ]]; then
+    if [ ! -x "${NSYS_BIN:-}" ]; then
+      echo "[srun] ERROR: NSYS=1 but NSYS_BIN is not executable: ${NSYS_BIN:-unset}"
+      exit 1
+    fi
+    echo "[srun] NSYS enabled: output=${NSYS_REP}"
+    "${NSYS_BIN}" profile \
+      --force-overwrite="${NSYS_FORCE_OVERWRITE}" \
+      --sample="${NSYS_SAMPLE}" \
+      --cpuctxsw=none \
+      --cuda-event-trace="${NSYS_CUDA_EVENT_TRACE}" \
+      --trace="${NSYS_TRACE}" \
+      --trace-fork-before-exec=true \
+      -o "${NSYS_OUT_PREFIX}" \
+      python -m torch.distributed.run \
+        --nnodes="$SLURM_NNODES" \
+        --nproc_per_node=4 \
+        --node_rank="$SLURM_PROCID" \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+        --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+        src/gpt2.py \
+        --run_type optimized \
+        --train_data_path train_small.bin \
+        --val_data_path val_small.bin \
+        --checkpoint_path "'"$RUN_DIR"'" \
+        --epochs 1 \
+        --seq_length 512 \
+        --micro_batch_size_per_gpu 2 \
+        --grad_accum_steps 1 \
+        --deepspeed_config src/deepspeed_config.json
+
+    if [ -f "${NSYS_REP}" ]; then
+      STATS_OUT="$RUN_DIR/profiles/nsys_stats_${HOST}.txt"
+      "${NSYS_BIN}" stats --report nvtx_sum,osrt_sum,cuda_api_sum,cuda_gpu_kern_sum "${NSYS_REP}" > "${STATS_OUT}" 2>&1 \
+        || "${NSYS_BIN}" stats "${NSYS_REP}" > "${STATS_OUT}" 2>&1 \
+        || true
+    fi
+  else
+    python -m torch.distributed.run \
+      --nnodes="$SLURM_NNODES" \
+      --nproc_per_node=4 \
+      --node_rank="$SLURM_PROCID" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+      --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+      src/gpt2.py \
+      --run_type optimized \
+      --train_data_path train_small.bin \
+      --val_data_path val_small.bin \
+      --checkpoint_path "'"$RUN_DIR"'" \
+      --epochs 1 \
+      --seq_length 512 \
+      --micro_batch_size_per_gpu 2 \
+      --grad_accum_steps 1 \
+      --deepspeed_config src/deepspeed_config.json
+  fi
 '
 
 if [[ "${NSYS:-0}" == "1" ]]; then
-  shopt -s nullglob
-  for f in "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.qdrep "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.nsys-rep; do
-    base="$(basename "$f")"
-    host="$(echo "$base" | sed -E "s/^nsys_${SLURM_JOB_ID}_//; s/\\.(qdrep|nsys-rep)$//")"
-    "$NSYS_BIN" stats --report gpu-kern-summary,gpu-api-summary,osrt-summary "$f" > "$RUN_DIR/profiles/nsys_stats_${host}.txt" || true
-  done
+  python scripts/profiling/parse_nsys_stats.py --run_dir "$RUN_DIR" || true
 fi

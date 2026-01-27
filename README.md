@@ -116,6 +116,22 @@ NCCL_LOGS=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
 - `training_metrics.json`: per-epoch tokens/sec, epoch wall time, batch config, and completion metadata.
 - `RUN_COMPLETE.txt`: completion marker with timestamp.
 
+## Profiling (Nsight Systems)
+
+Nsight Systems profiling is opt-in via `NSYS=1`. The Slurm script loads `cuda/12.9` automatically when profiling is enabled.
+
+Example:
+```bash
+RUN_DIR=$SCRATCH/gpt2_runs/bigpurple_v100_2026-01-26/8gpu_2node \
+NSYS=1 DIST_SHUTDOWN_TIMEOUT_SEC=30 \
+sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
+
+Artifacts are written under `$RUN_DIR/profiles/`:
+- `nsys_<jobid>_<host>.nsys-rep`: one report per node
+- `nsys_stats_<host>.txt`: headless stats output (nvtx/osrt/cuda)
+- `profile_summary.json`: parsed summary (top NVTX/OSRT + bottleneck hint)
+
 ## Notes / Limitations
 
 - Charts are optional and use only `training_metrics.json` (`scripts/3_generate_charts.py`).
