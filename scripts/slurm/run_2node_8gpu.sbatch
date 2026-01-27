@@ -90,6 +90,9 @@ if [[ "${NSYS:-0}" == "1" ]]; then
     echo "ERROR: NSYS=1 but NSYS_BIN is not executable: $NSYS_BIN"
     exit 1
   fi
+  # Nsight Systems writes intermediate streams to /tmp by default; on some nodes /tmp can be constrained.
+  export TMPDIR="${SLURM_TMPDIR:-$RUN_DIR/profiles/tmp}"
+  mkdir -p "$TMPDIR"
   export NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_%h"
   export NSYS_ARGS="profile --force-overwrite=true --sample=none --cpuctxsw=none --cuda-event-trace=false --trace=cuda,nvtx,osrt -o ${NSYS_OUT_PREFIX}"
   NSYS_WRAPPER="$RUN_DIR/profiles/nsys_wrapper.py"
@@ -229,8 +232,9 @@ fi
 
 if [[ "${NSYS:-0}" == "1" ]]; then
   shopt -s nullglob
-  for f in "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.qdrep; do
-    host="$(basename "$f" | sed -E "s/nsys_${SLURM_JOB_ID}_//; s/\\.qdrep$//")"
+  for f in "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.qdrep "$RUN_DIR"/profiles/nsys_${SLURM_JOB_ID}_*.nsys-rep; do
+    base="$(basename "$f")"
+    host="$(echo "$base" | sed -E "s/^nsys_${SLURM_JOB_ID}_//; s/\\.(qdrep|nsys-rep)$//")"
     "$NSYS_BIN" stats --report gpu-kern-summary,gpu-api-summary,osrt-summary "$f" > "$RUN_DIR/profiles/nsys_stats_${host}.txt" || true
   done
 fi
