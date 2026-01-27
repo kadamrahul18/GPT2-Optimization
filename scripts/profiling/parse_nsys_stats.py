@@ -6,41 +6,89 @@ import re
 from datetime import datetime, timezone
 
 
-def parse_time_percent(line: str):
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", line)
-    return float(match.group(1)) if match else None
-
-
-def parse_total_time_str(line: str):
-    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(ns|us|ms|s)\b", line)
-    if not matches:
+def parse_time_percent(value: str):
+    value = value.strip()
+    if not value:
         return None
-    value, unit = matches[-1]
-    return f"{value} {unit}"
+    if value.endswith("%"):
+        value = value[:-1].strip()
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
-def parse_name(line: str):
-    # Take everything up to the first numeric field as the "name".
-    match = re.search(r"\s+\d", line)
+def parse_total_time_str(value: str):
+    # Nsight Systems commonly prints Total Time as comma-grouped integers under a header like
+    # "Total Time (ns)" with no explicit unit per-row. Keep the output as "<int> ns".
+    raw = value.strip()
+    if not raw:
+        return None
+    raw = raw.replace(",", "")
+    if raw.isdigit():
+        return f"{raw} ns"
+
+    # Fallback for other formats that include explicit units.
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(ns|us|ms|s)\b", value)
     if not match:
         return None
-    return line[: match.start()].strip()
+    number, unit = match.group(1), match.group(2)
+    return f"{number} {unit}"
+
+
+def parse_table_row(line: str):
+    # Rows are space-aligned tables where columns are separated by 2+ spaces.
+    # The first column is Time (%), and the last column is the name (NVTX range / OSRT symbol).
+    columns = [c.strip() for c in re.split(r"\s{2,}", line.strip()) if c.strip()]
+    if len(columns) < 3:
+        return None
+
+    time_percent = parse_time_percent(columns[0])
+    if time_percent is None:
+        return None
+
+    total_time = parse_total_time_str(columns[1])
+    name = columns[-1]
+    if not name:
+        return None
+
+    return time_percent, total_time, name
 
 
 def extract_ranked_items(text: str, kind: str):
-    # Heuristic: scan for lines that look like table rows and contain a Time (%) value.
+    # Scan only the relevant Nsight Systems report section, then parse rows where:
+    # - first column is a float time percent
+    # - last column is the name (NVTX range / OSRT symbol)
+    start_markers = {
+        "nvtx": "NVTX Range Summary",
+        "osrt": "OS Runtime Summary",
+    }
+    start_marker = start_markers.get(kind)
+    if start_marker is None:
+        raise ValueError(f"Unsupported kind: {kind}")
+
     items = []
+    in_section = False
     for raw in text.splitlines():
-        line = raw.strip("\n")
-        if not line or line.startswith(("-", "=")):
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if start_marker in stripped:
+            in_section = True
             continue
-        time_percent = parse_time_percent(line)
-        if time_percent is None:
+        if in_section and stripped.startswith("**") and start_marker not in stripped:
+            in_section = False
+        if in_section and stripped.startswith("Processing ["):
+            in_section = False
+        if not in_section:
             continue
-        name = parse_name(line)
-        if not name:
+
+        if not stripped or stripped.startswith(("-", "=")):
             continue
-        total_time = parse_total_time_str(line)
+
+        parsed = parse_table_row(line)
+        if parsed is None:
+            continue
+        time_percent, total_time, name = parsed
         items.append(
             {
                 "kind": kind,
