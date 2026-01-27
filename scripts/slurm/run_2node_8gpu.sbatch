@@ -164,7 +164,7 @@ fi
 # One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
 "$SRUN" --export=ALL bash -lc '
   set -euo pipefail
-  if [[ "${NSYS:-0}" == "1" || "${NCU:-0}" == "1" ]]; then
+  if [[ ( "${NSYS:-0}" == "1" && "${SLURM_NODEID:-0}" == "0" ) || "${NCU:-0}" == "1" ]]; then
     if command -v module >/dev/null 2>&1; then
       module load cuda/12.9
     fi
@@ -178,7 +178,7 @@ fi
   NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
   NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
 
-  if [[ "${NSYS:-0}" == "1" ]]; then
+  if [[ "${NSYS:-0}" == "1" && "${SLURM_NODEID:-0}" == "0" ]]; then
     if [ ! -x "${NSYS_BIN:-}" ]; then
       echo "[srun] ERROR: NSYS=1 but NSYS_BIN is not executable: ${NSYS_BIN:-unset}"
       exit 1
@@ -217,6 +217,9 @@ fi
         || true
     fi
   else
+    if [[ "${NSYS:-0}" == "1" ]]; then
+      echo "[srun] NSYS enabled, but disabled on this node (SLURM_NODEID=${SLURM_NODEID:-unknown})"
+    fi
     python -m torch.distributed.run \
       --nnodes="$SLURM_NNODES" \
       --nproc_per_node=4 \
