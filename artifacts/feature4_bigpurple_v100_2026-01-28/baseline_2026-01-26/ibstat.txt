@@ -1,0 +1,17 @@
+CA 'mlx5_0'
+	CA type: MT4119
+	Number of ports: 1
+	Firmware version: 16.35.4030
+	Hardware version: 0
+	Node GUID: 0x506b4b0300030a2a
+	System image GUID: 0x506b4b0300030a2a
+	Port 1:
+		State: Active
+		Physical state: LinkUp
+		Rate: 100
+		Base lid: 179
+		LMC: 0
+		SM lid: 49
+		Capability mask: 0xa651e848
+		Port GUID: 0x506b4b0300030a2a
+		Link layer: InfiniBand

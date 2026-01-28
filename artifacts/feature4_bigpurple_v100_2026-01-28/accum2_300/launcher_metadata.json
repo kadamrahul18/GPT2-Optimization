@@ -1,0 +1,20 @@
+{
+  "checkpoint_path": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_300",
+  "rank0_host": "gn-0013",
+  "world_size": 8,
+  "git_commit": "d8ca45116014c7556736980e5c6a63839305c340",
+  "slurm": {
+    "job_id": "17775914",
+    "nodelist": "gn-[0013-0014]",
+    "hosts": "gn-0013\ngn-0014"
+  },
+  "env": {
+    "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+    "MASTER_ADDR": "gn-0013.cm.cluster",
+    "MASTER_PORT": "42489"
+  },
+  "nccl_env": {
+    "NCCL_LOGS": "0",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1"
+  }
+}

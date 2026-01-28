@@ -1,0 +1,274 @@
+#!/bin/bash
+#
+# 2 nodes x 4 GPUs/node (8 total) Slurm launcher.
+# - Uses Slurm-native `srun` (no passwordless SSH required).
+# - Writes artifacts to a single run dir via --checkpoint_path.
+#
+# Usage:
+#   sbatch scripts/slurm/run_2node_8gpu.sbatch
+#
+
+#SBATCH --job-name=gpt2_2node_8gpu
+#SBATCH --partition=gpu4_short
+#SBATCH --nodes=2
+#SBATCH --gres=gpu:4
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=02:00:00
+
+set -euo pipefail
+
+# --- Slurm srun resolution ---
+SRUN="${SRUN:-/cm/shared/apps/slurm/current/bin/srun}"
+if [ ! -x "$SRUN" ]; then
+  echo "ERROR: srun not found/executable at SRUN='$SRUN'."
+  echo "Set SRUN to the absolute path of srun and retry (e.g. SRUN=/path/to/srun sbatch ...)."
+  exit 1
+fi
+export PATH="$(dirname "$SRUN"):$PATH"
+echo "SRUN=$SRUN"
+"$SRUN" --version || true
+# --- End srun resolution ---
+
+# --- Environment setup (edit before running) ---
+# Replace `deepspeed` if your env name differs.
+if command -v module >/dev/null 2>&1; then
+  module purge
+  if [[ "${NSYS:-0}" == "1" || "${NCU:-0}" == "1" ]]; then
+    module load cuda/12.9
+  fi
+  # Some module systems reset PATH; keep Slurm tools available.
+  export PATH="$(dirname "$SRUN"):$PATH"
+fi
+source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
+conda activate deepspeed
+echo "which python: $(which python)"
+python -V
+python - <<'PY'
+try:
+    import torch
+    print(f"torch: {torch.__version__}")
+    print(f"cuda_available: {torch.cuda.is_available()}")
+    print(f"torch.version.cuda: {torch.version.cuda}")
+    if torch.cuda.is_available():
+        print(f"cuda_device_count: {torch.cuda.device_count()}")
+        print(f"cuda_device_name0: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print(f"ERROR: torch/cuda check failed: {e}")
+    raise
+PY
+# --- End environment setup ---
+
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
+cd "$REPO_ROOT"
+
+RUN_DIR="${RUN_DIR:-${REPO_ROOT}/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node}"
+
+echo "SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unknown}"
+echo "REPO_ROOT=$REPO_ROOT"
+echo "PWD=$(pwd)"
+echo "RUN_DIR=$RUN_DIR"
+echo "REPO_ROOT perms:"
+ls -ld "$REPO_ROOT" || true
+echo "RUN_DIR parent perms:"
+ls -ld "$(dirname "$RUN_DIR")" || true
+
+if ! mkdir -p "$RUN_DIR" 2>/dev/null; then
+  echo "ERROR: cannot create RUN_DIR='$RUN_DIR' (permission denied)."
+  echo "Set RUN_DIR to a writable path (e.g. \$SCRATCH/... or \$HOME/...) and resubmit:"
+  echo "  RUN_DIR=\$SCRATCH/gpt2_runs/bigpurple_v100_2026-01-26/8gpu_2node sbatch scripts/slurm/run_2node_8gpu.sbatch"
+  exit 1
+fi
+
+mkdir -p "$RUN_DIR/profiles"
+mkdir -p "$RUN_DIR/torchrun_logs"
+
+# --- Nsight Systems toggles (NSYS=1) ---
+export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt}"
+export NSYS_CUDA_EVENT_TRACE="${NSYS_CUDA_EVENT_TRACE:-false}"
+export NSYS_SAMPLE="${NSYS_SAMPLE:-none}"
+export NSYS_FORCE_OVERWRITE="${NSYS_FORCE_OVERWRITE:-true}"
+if [[ "${NSYS:-0}" == "1" ]]; then
+  if command -v module >/dev/null 2>&1; then
+    module load cuda/12.9
+  fi
+  export NSYS_BIN=/gpfs/share/apps/cuda/12.9/bin/nsys
+  if [ ! -x "$NSYS_BIN" ]; then
+    echo "ERROR: NSYS=1 but NSYS_BIN is not executable: $NSYS_BIN"
+    exit 1
+  fi
+  # Nsight Systems (and Python multiprocessing) may use TMPDIR for AF_UNIX sockets; keep it short to avoid
+  # "OSError: AF_UNIX path too long" during multi-process training.
+  export TMPDIR="${SLURM_TMPDIR:-$REPO_ROOT/.tmp}"
+  export TMP="$TMPDIR"
+  export TEMP="$TMPDIR"
+  mkdir -p "$TMPDIR"
+fi
+# --- End Nsight Systems toggles ---
+
+# --- Optional NCCL debug + topology artifacts (written under RUN_DIR) ---
+# Enable once when needed:
+#   NCCL_LOGS=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
+#
+# Logs:
+# - NCCL per-rank logs:   $RUN_DIR/nccl_rank_*.log
+# - NCCL topology dump:   $RUN_DIR/nccl_topo.xml
+#
+# Quick grep tips:
+# - Transport (IB vs socket):   grep -E "NET/|Using (IB|Socket)|bootstrap" nccl_rank_*.log
+# - Rings/trees/channels:       grep -E "Channel|Rings|Trees|graph" nccl_rank_*.log
+if [[ "${NCCL_LOGS:-0}" == "1" ]]; then
+  export NCCL_DEBUG=INFO
+  export NCCL_DEBUG_SUBSYS=INIT,ENV,GRAPH,NET,COLL
+  export NCCL_DEBUG_FILE="$RUN_DIR/nccl_rank_%h_%p.log"
+  export NCCL_TOPO_DUMP_FILE="$RUN_DIR/nccl_topo.xml"
+  export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+  export NCCL_ASYNC_ERROR_HANDLING=1
+  export NCCL_IB_HCA=mlx5_0
+  export NCCL_SOCKET_IFNAME=^lo,docker0
+fi
+# --- End optional NCCL debug ---
+
+#
+# Optional distributed debug (collective trace + better stack traces).
+# Enable via:
+#   DIST_DEBUG=1 sbatch scripts/slurm/run_2node_8gpu.sbatch
+#
+if [[ "${DIST_DEBUG:-0}" == "1" ]]; then
+  export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
+  export TORCH_SHOW_CPP_STACKTRACES=1
+  export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
+  export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-33554432}"
+fi
+
+HOSTS="$("$SRUN" --export=ALL --nodes="$SLURM_NNODES" --ntasks="$SLURM_NNODES" hostname | sort -u)"
+if [ -z "${HOSTS//[[:space:]]/}" ]; then
+  echo "ERROR: failed to discover hosts via srun; got empty host list."
+  echo "SLURM_NNODES=${SLURM_NNODES:-unknown}"
+  exit 1
+fi
+MASTER_ADDR="$(echo "$HOSTS" | head -n 1)"
+MASTER_PORT="${MASTER_PORT:-29511}"
+
+export MASTER_ADDR MASTER_PORT
+export SLURM_HOSTS="$HOSTS"
+export RUN_DIR
+export GIT_COMMIT="${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}"
+
+echo "RUN_DIR=$RUN_DIR"
+echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unknown}"
+echo "HOSTS=${HOSTS//$'\n'/,}"
+echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+
+# --- System evidence (once, on rank0 host) ---
+if [ -n "${MASTER_ADDR:-}" ]; then
+  "$SRUN" --export=ALL --nodes=1 --ntasks=1 --nodelist="$MASTER_ADDR" bash -lc '
+    set -euo pipefail
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      nvidia-smi topo -m > "$RUN_DIR/topo.txt"
+    fi
+    if command -v ibstat >/dev/null 2>&1; then
+      ibstat > "$RUN_DIR/ibstat.txt"
+    fi
+  ' || true
+fi
+# --- End system evidence ---
+
+# One Slurm task per node; torchrun spawns 4 local GPU processes per node (no SSH needed).
+"$SRUN" --export=ALL bash -lc '
+  set -euo pipefail
+  if [[ ( "${NSYS:-0}" == "1" && "${SLURM_NODEID:-0}" == "0" ) || "${NCU:-0}" == "1" ]]; then
+    if command -v module >/dev/null 2>&1; then
+      module load cuda/12.9
+    fi
+  fi
+  source /gpfs/share/apps/anaconda3/gpu/2025.06/etc/profile.d/conda.sh
+  conda activate deepspeed
+  echo "[srun] which python: $(which python)"
+  python -V
+
+  HOST="$(hostname)"
+  TORCHRUN_LOG_DIR="$RUN_DIR/torchrun_logs"
+  mkdir -p "$TORCHRUN_LOG_DIR"
+  TORCHRUN_LOGS="${TORCHRUN_LOGS:-1}"
+  TORCHRUN_LOG_ARGS=""
+  if [[ "$TORCHRUN_LOGS" == "1" ]]; then
+    TORCHRUN_LOG_ARGS="--tee 3 --log_dir $TORCHRUN_LOG_DIR"
+  fi
+  EXTRA_ARGS="${GPT2_EXTRA_ARGS:-}"
+  MICRO_BATCH_SIZE_PER_GPU="${MICRO_BATCH_SIZE_PER_GPU:-2}"
+  GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+  NSYS_OUT_PREFIX="$RUN_DIR/profiles/nsys_${SLURM_JOB_ID}_${HOST}"
+  NSYS_REP="${NSYS_OUT_PREFIX}.nsys-rep"
+
+  if [[ "${NSYS:-0}" == "1" && "${SLURM_NODEID:-0}" == "0" ]]; then
+    if [ ! -x "${NSYS_BIN:-}" ]; then
+      echo "[srun] ERROR: NSYS=1 but NSYS_BIN is not executable: ${NSYS_BIN:-unset}"
+      exit 1
+    fi
+    echo "[srun] NSYS enabled: output=${NSYS_REP}"
+    "${NSYS_BIN}" profile \
+      --force-overwrite="${NSYS_FORCE_OVERWRITE}" \
+      --sample="${NSYS_SAMPLE}" \
+      --cpuctxsw=none \
+      --cuda-event-trace="${NSYS_CUDA_EVENT_TRACE}" \
+      --trace="${NSYS_TRACE}" \
+      --trace-fork-before-exec=true \
+      -o "${NSYS_OUT_PREFIX}" \
+      python -m torch.distributed.run \
+        --nnodes="$SLURM_NNODES" \
+        --nproc_per_node=4 \
+        --node_rank="$SLURM_PROCID" \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+        --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+        $TORCHRUN_LOG_ARGS \
+        src/gpt2.py \
+        --run_type optimized \
+        --train_data_path train_small.bin \
+        --val_data_path val_small.bin \
+        --checkpoint_path "'"$RUN_DIR"'" \
+        --epochs 1 \
+        --seq_length 512 \
+        --micro_batch_size_per_gpu "${MICRO_BATCH_SIZE_PER_GPU}" \
+        --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
+        --deepspeed_config src/deepspeed_config.json \
+        $EXTRA_ARGS
+
+    if [ -f "${NSYS_REP}" ]; then
+      STATS_OUT="$RUN_DIR/profiles/nsys_stats_${HOST}.txt"
+      "${NSYS_BIN}" stats --report nvtx_sum,osrt_sum,cuda_api_sum,cuda_gpu_kern_sum "${NSYS_REP}" > "${STATS_OUT}" 2>&1 \
+        || "${NSYS_BIN}" stats "${NSYS_REP}" > "${STATS_OUT}" 2>&1 \
+        || true
+    fi
+  else
+    if [[ "${NSYS:-0}" == "1" ]]; then
+      echo "[srun] NSYS enabled, but disabled on this node (SLURM_NODEID=${SLURM_NODEID:-unknown})"
+    fi
+    python -m torch.distributed.run \
+      --nnodes="$SLURM_NNODES" \
+      --nproc_per_node=4 \
+      --node_rank="$SLURM_PROCID" \
+      --rdzv_backend=c10d \
+      --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+      --rdzv_id="${SLURM_JOB_ID:-gpt2_2node}" \
+      $TORCHRUN_LOG_ARGS \
+      src/gpt2.py \
+      --run_type optimized \
+      --train_data_path train_small.bin \
+      --val_data_path val_small.bin \
+      --checkpoint_path "'"$RUN_DIR"'" \
+      --epochs 1 \
+      --seq_length 512 \
+      --micro_batch_size_per_gpu "${MICRO_BATCH_SIZE_PER_GPU}" \
+      --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
+      --deepspeed_config src/deepspeed_config.json \
+      $EXTRA_ARGS
+  fi
+'
+
+if [[ "${NSYS:-0}" == "1" ]]; then
+  python scripts/profiling/parse_nsys_stats.py --run_dir "$RUN_DIR" || true
+fi

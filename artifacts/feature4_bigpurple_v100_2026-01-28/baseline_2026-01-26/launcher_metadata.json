@@ -1,0 +1,28 @@
+{
+  "checkpoint_path": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-26/8gpu_2node",
+  "rank0_host": "gn-0011",
+  "world_size": 8,
+  "git_commit": "44d2a7653a973ad6374b2d9ef5876d8ad3c51a5b",
+  "slurm": {
+    "job_id": "17767552",
+    "nodelist": "gn-[0011,0014]",
+    "hosts": "gn-0011\ngn-0014"
+  },
+  "env": {
+    "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+    "MASTER_ADDR": "gn-0011.cm.cluster",
+    "MASTER_PORT": "42805"
+  },
+  "nccl_env": {
+    "NCCL_ASYNC_ERROR_HANDLING": "1",
+    "NCCL_TOPO_DUMP_FILE": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/nccl_topo.xml",
+    "NCCL_DEBUG_FILE": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-26/8gpu_2node/nccl_rank_%h_%p.log",
+    "NCCL_DEBUG": "INFO",
+    "NCCL_DEBUG_SUBSYS": "INIT,ENV,GRAPH,NET,COLL",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+    "NCCL_IB_HCA": "mlx5_0",
+    "TORCH_NCCL_TRACE_BUFFER_SIZE": "33554432",
+    "NCCL_LOGS": "1",
+    "NCCL_SOCKET_IFNAME": "^lo,docker0"
+  }
+}

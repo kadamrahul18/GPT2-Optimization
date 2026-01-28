@@ -1,104 +1,212 @@
-# GPT-2 Training Benchmarks
+# GPT-2 2-Node Distributed Training + Profiling + Optimization (DeepSpeed)
 
-Train GPT-2 with a baseline single process or multi-GPU DeepSpeed on a single node. Each run writes `training_metrics.json` (schema v2.0) and `RUN_COMPLETE.txt`.
+This repo demonstrates **end-to-end multi-node GPT-2 training on Slurm (2 nodes × 4×V100 = 8 GPUs)** with reproducible run directories, optional NCCL “proof” artifacts, Nsight Systems profiling, and a measured communication-focused optimization that improves throughput on a fixed-work harness.
 
-## Key Results (Big Purple V100)
+## What This Repo Demonstrates
 
-Artifacts:
-- `benchmarks/bigpurple_v100_2026-01-08/1gpu/training_metrics.json`
-- `benchmarks/bigpurple_v100_2026-01-08/2gpu/training_metrics.json`
-- `benchmarks/bigpurple_v100_2026-01-08/4gpu/training_metrics.json`
+- **Distributed training harness**: a single Slurm command launches a 2-node, 8‑GPU DeepSpeed run and writes a deterministic run directory (`training_metrics.json`, `RUN_COMPLETE.txt`, `launcher_metadata.json`).
+- **Profiling pipeline**: optional Nsight Systems capture + `nsys stats` extraction + a readable `profiles/profile_summary.json`.
+- **Performance optimization (Feature 4)**: DeepSpeed ZeRO‑1 communication tuning (bucket sizes) validated with an A/B experiment showing a **~+19.5% throughput improvement** at constant batch/sequence/steps.
 
-Throughput is **global tokens/sec**. Wall time is the fixed-work total time.
+## Environment (Big Purple)
 
-| GPUs | Tokens/sec (global) | Wall time (s) | Speedup vs 1 GPU | Scaling efficiency |
-| --- | --- | --- | --- | --- |
-| 1 | 29600.05 | 1017.61 | 1.00 | 1.00 |
-| 2 | 57289.31 | 522.01 | 1.94 | 0.97 |
-| 4 | 100791.44 | 296.10 | 3.41 | 0.85 |
+Stable context from recorded metrics:
+- Cluster: NYU Big Purple (Slurm)
+- Nodes: 2 nodes (examples seen in runs: `gn-0013`, `gn-0014`)
+- GPUs: Tesla V100-SXM2-16GB, 4 per node → 8 GPUs total (`world_size=8`)
+- Python 3.11.14, PyTorch 2.9.1+cu128, DeepSpeed 0.18.3, Transformers 4.57.3, CUDA 12.8
+- Model: GPT‑2 (n_layer=12, n_head=12, n_embd=768), `seq_len=512`
+- Precision: fp16 via DeepSpeed, ZeRO stage=1
+- Dataset: `train_small` / `val_small` (subset sizes recorded in `training_metrics.json`)
 
-Regenerate table:
-```bash
-python scripts/generate_scaling_table.py \
-  --gpu1 benchmarks/bigpurple_v100_2026-01-08/1gpu/training_metrics.json \
-  --gpu2 benchmarks/bigpurple_v100_2026-01-08/2gpu/training_metrics.json \
-  --gpu4 benchmarks/bigpurple_v100_2026-01-08/4gpu/training_metrics.json
-```
+## Quickstart: 2-node (8×V100) Slurm Run
 
-## Benchmark Protocol
+Prereqs:
+- `train_small.bin` / `val_small.bin` present in repo root (see **Data** below).
+- Run from the repo root.
 
-Constants (fixed work):
-- `seq_len = 512`
-- `global_batch_size = 16`
-- `optimizer_steps = 3561`
-- `tokens_processed_global = 29,171,712`
-- `micro_batch_size_per_gpu = 4` with `grad_accum_steps` set per GPU count
-
-Global batch size is kept constant by reducing `grad_accum_steps` as GPU count increases.
-
-## Quickstart
-
-Setup:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Data:
+### Data (small subset)
 ```bash
 python scripts/1_download_data.py
 python scripts/preprocess_small.py
 ```
 
-Runs (constant global batch size = 16):
+### Throughput harness (no profiler, fixed small work window)
+This is the baseline for performance claims (no Nsight overhead):
 ```bash
-# 1 GPU baseline
-export CUDA_VISIBLE_DEVICES=0
-python src/gpt2.py \
-  --run_type baseline \
-  --train_data_path train_small.bin \
-  --val_data_path val_small.bin \
-  --checkpoint_path checkpoint/1gpu \
-  --epochs 1 \
-  --seq_length 512 \
-  --micro_batch_size_per_gpu 4 \
-  --grad_accum_steps 4 \
-  --deepspeed_config src/deepspeed_config.json
-
-# 2 GPU DeepSpeed
-export CUDA_VISIBLE_DEVICES=0,1
-deepspeed src/gpt2.py \
-  --run_type optimized \
-  --train_data_path train_small.bin \
-  --val_data_path val_small.bin \
-  --checkpoint_path checkpoint/2gpu \
-  --epochs 1 \
-  --seq_length 512 \
-  --micro_batch_size_per_gpu 4 \
-  --grad_accum_steps 2 \
-  --deepspeed_config src/deepspeed_config.json
-
-# 4 GPU DeepSpeed
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-deepspeed src/gpt2.py \
-  --run_type optimized \
-  --train_data_path train_small.bin \
-  --val_data_path val_small.bin \
-  --checkpoint_path checkpoint/4gpu \
-  --epochs 1 \
-  --seq_length 512 \
-  --micro_batch_size_per_gpu 4 \
-  --grad_accum_steps 1 \
-  --deepspeed_config src/deepspeed_config.json
+RUN_DIR=/gpfs/scratch/$USER/GPT2-Optimization/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node_accum2_300 \
+  NSYS=0 NCCL_LOGS=0 TORCHRUN_LOGS=0 DIST_DEBUG=0 \
+  GRAD_ACCUM_STEPS=2 MICRO_BATCH_SIZE_PER_GPU=2 \
+  GPT2_EXTRA_ARGS="--profile_mode --max_train_steps 300 --max_val_steps 50" \
+  sbatch scripts/slurm/run_2node_8gpu.sbatch
 ```
 
-## Artifacts
+Notes:
+- `--profile_mode` throttles hot-loop logging/tqdm and adds stable, high-level NVTX ranges (`train/*`, `val/*`) on top of DeepSpeed’s NVTX ranges.
+- `--max_train_steps/--max_val_steps` bound the run for quick, repeatable comparisons.
+- The exact command line is also recorded under `training_metrics.json["command_line"]`.
 
-- `training_metrics.json`: per-epoch tokens/sec, epoch wall time, batch config, and completion metadata.
-- `RUN_COMPLETE.txt`: completion marker with timestamp.
+### Profiling run (Nsight Systems)
+`NSYS=1` runs slower (profiling overhead). Use it for attribution, not for headline throughput.
+```bash
+RUN_DIR=/gpfs/scratch/$USER/GPT2-Optimization/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node_accum2_bucket200_nsys80 \
+  NSYS=1 NCCL_LOGS=0 TORCHRUN_LOGS=1 DIST_DEBUG=0 \
+  GRAD_ACCUM_STEPS=2 MICRO_BATCH_SIZE_PER_GPU=2 \
+  GPT2_EXTRA_ARGS="--profile_mode --max_train_steps 80 --max_val_steps 0" \
+  sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
 
-## Notes / Limitations
+## Artifacts (What a Run Produces)
 
-- Charts are optional and use only `training_metrics.json` (`scripts/3_generate_charts.py`).
-- Slurm metadata is captured in `training_metrics.json` when present.
+Each Slurm run writes a run directory at `RUN_DIR` containing:
+
+- `training_metrics.json` (rank0): schema v2.0 metrics, including tokens/sec, wall time, batch config, Slurm metadata when available.
+- `RUN_COMPLETE.txt` (rank0): completion marker including `world_size`, `tokens_per_sec`, and `total_wall_time_sec`.
+- `launcher_metadata.json` (rank0): launcher context (host, env summary, Slurm info).
+- Checkpoints (e.g. `epoch-1`): large model artifacts; **not meant for git**.
+
+Optional “proof” artifacts (enable with `NCCL_LOGS=1`):
+- `nccl_topo.xml`: NCCL topology dump.
+- `nccl_rank_<host>_<pid>.log`: per-rank NCCL debug logs (these runs show “Using network IB”).
+- `ibstat.txt`, `topo.txt`: network + GPU topology evidence (e.g., `mlx5_0` speed `100000`).
+
+Optional profiling artifacts (enable with `NSYS=1`):
+- `profiles/nsys_<jobid>_<host>.nsys-rep`
+- `profiles/nsys_<jobid>_<host>.sqlite`
+- `profiles/nsys_stats_<host>.txt` (NVTX/OSRT/CUDA API summaries)
+- `profiles/profile_summary.json` (parsed top5, generated by `scripts/profiling/parse_nsys_stats.py`)
+
+Curated artifacts used for the README are also checked in under:
+- `artifacts/feature4_bigpurple_v100_2026-01-28/`
+
+Example run directories created on Big Purple include:
+- `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_no_nsys_300`
+- `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_300`
+- `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_bucket200_300`
+- `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_bucket200_nsys80`
+- `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_profile_300`
+
+## Performance Results (Feature 4)
+
+**A/B experiment (comparable fixed-work harness)**: constant `world_size=8`, `seq_len=512`, `micro_batch=2`, `grad_accum=2`, `max_train_steps=300`, `max_val_steps=50`.
+
+**What changed in “bucket200”**
+- `src/deepspeed_config.json`: set `zero_optimization.reduce_bucket_size=200000000` and `zero_optimization.allgather_bucket_size=200000000` (≈200MB).
+- `src/deepspeed_config.json`: disabled activation checkpoint partitioning (`activation_checkpointing.partition_activations=false`) for this workload.
+
+Minimal config snippet:
+```json
+{
+  "zero_optimization": {
+    "stage": 1,
+    "reduce_bucket_size": 200000000,
+    "allgather_bucket_size": 200000000
+  },
+  "activation_checkpointing": {
+    "partition_activations": false
+  }
+}
+```
+
+### Reproduce the A/B (on Big Purple)
+Run A (baseline, no profiler):
+```bash
+RUN_DIR=/gpfs/scratch/$USER/GPT2-Optimization/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node_accum2_300 \
+  NSYS=0 NCCL_LOGS=0 TORCHRUN_LOGS=0 DIST_DEBUG=0 \
+  GRAD_ACCUM_STEPS=2 MICRO_BATCH_SIZE_PER_GPU=2 \
+  GPT2_EXTRA_ARGS="--profile_mode --max_train_steps 300 --max_val_steps 50" \
+  sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
+
+Run B (tuned “bucket200”, no profiler):
+```bash
+RUN_DIR=/gpfs/scratch/$USER/GPT2-Optimization/benchmarks/bigpurple_v100_$(date +%F)/8gpu_2node_accum2_bucket200_300 \
+  NSYS=0 NCCL_LOGS=0 TORCHRUN_LOGS=0 DIST_DEBUG=0 \
+  GRAD_ACCUM_STEPS=2 MICRO_BATCH_SIZE_PER_GPU=2 \
+  GPT2_EXTRA_ARGS="--profile_mode --max_train_steps 300 --max_val_steps 50" \
+  sbatch scripts/slurm/run_2node_8gpu.sbatch
+```
+
+Compare:
+- `RUN_DIR/training_metrics.json` → `epochs[0].tokens_per_sec_global`, `epochs[0].step_time_p95_sec`
+- `RUN_DIR/training_metrics.json` → `summary.total_wall_time_sec`
+
+### Results (curated in-repo artifacts)
+The exact files backing the table below are checked in under `artifacts/feature4_bigpurple_v100_2026-01-28/`.
+
+| Run | run_dir (curated) | Tokens/sec (global) | total_wall_time_sec | step_time_p95_sec | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| Baseline (accum2) | `artifacts/feature4_bigpurple_v100_2026-01-28/accum2_300` | 29,971.23 | 82.96 | 0.07741 | `NSYS=0`, `global_batch=32` |
+| Tuned (bucket200) | `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_300` | 35,806.75 | 71.20 | 0.06317 | `NSYS=0`, ZeRO‑1 bucket sizing |
+
+Throughput improvement:
+- `(35,806.75 / 29,971.23 − 1) ≈ +19.5%`
+
+Note:
+- The A/B runs above were executed on different commits (`d8ca451` vs `ba03420`). The intended behavioral change for Feature 4 is the DeepSpeed bucket sizing + activation-checkpoint toggle described above; rerunning Run A on the latest commit is recommended for a single-commit apples-to-apples comparison.
+
+Profiling-overhead example (not used for headline throughput):
+- `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_nsys80` reports `tokens_per_sec_global ≈ 24,090.97` with `NSYS=1`.
+
+## Bottleneck & Hypothesis (Profiling Evidence)
+
+Profiling evidence (baseline trace + tuned attribution trace) indicates training time is dominated by backward and gradient synchronization (communication-heavy backward):
+
+- Baseline NVTX (Nsight Systems `nvtx_sum`):
+  - `:DeepSpeedEngine.backward` **53.9%**
+  - `:DeepSpeedEngine.allreduce_gradients` **40.8%**
+  - `NCCL:ncclAllReduce` appears with **42,748 instances**
+  - Source: `artifacts/feature4_bigpurple_v100_2026-01-28/baseline_2026-01-26/nsys_stats_gn-0011.txt`
+
+- Tuned NVTX (bucket200, `NSYS=1`, 80-step profiling run):
+  - `:DeepSpeedEngine.allreduce_gradients` **16.8%**
+  - `NCCL:ncclAllReduce` **520 instances**
+  - Source: `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_nsys80/nsys_stats_gn-0013.txt`
+
+Note: the baseline and tuned profiles above come from different capture windows and should be treated as attribution evidence (not as directly comparable benchmark results).
+
+OS Runtime Summary shows large time in `poll` / `pthread_cond_timedwait` / `sem_wait` / `sem_timedwait`, consistent with distributed waiting and synchronization.
+
+## Profiling: How to Reproduce
+
+1) Run a short profiling job (`NSYS=1`) and wait for completion. Artifacts land under `RUN_DIR/profiles/`.
+2) Parse the stats into a compact summary:
+```bash
+python scripts/profiling/parse_nsys_stats.py --run_dir "$RUN_DIR"
+cat "$RUN_DIR/profiles/profile_summary.json"
+```
+3) View raw tables:
+```bash
+sed -n '/NVTX Range Summary/,/OS Runtime Summary/p' "$RUN_DIR"/profiles/nsys_stats_*.txt
+sed -n '/OS Runtime Summary/,/CUDA API Summary/p' "$RUN_DIR"/profiles/nsys_stats_*.txt
+```
+4) To inspect the timeline, open `profiles/nsys_<jobid>_<host>.nsys-rep` in the Nsight Systems GUI (copy it off-cluster if needed).
+
+## Repo Structure
+
+- `src/`
+  - `src/gpt2.py`: training entrypoint (baseline + DeepSpeed), metrics output, optional profiling-friendly mode.
+  - `src/deepspeed_config.json`: DeepSpeed defaults (fp16, ZeRO‑1, bucket sizing).
+- `scripts/`
+  - `scripts/slurm/run_2node_8gpu.sbatch`: 2-node launcher with optional NSYS/NCCL logs.
+  - `scripts/profiling/parse_nsys_stats.py`: parses `nsys_stats_*.txt` → `profiles/profile_summary.json`.
+  - `scripts/1_download_data.py`, `scripts/preprocess_small.py`: data pipeline for `train_small.bin`/`val_small.bin`.
+- `benchmarks/`: example benchmark outputs (full runs).
+- `artifacts/`: curated, small artifacts used to document Feature 4.
+
+## Notes / Caveats
+
+- **Profiling overhead**: `NSYS=1` reduces throughput; use it for attribution only.
+- **Comparable runs**: for throughput claims, keep `world_size`, `seq_len`, `micro_batch_size_per_gpu`, `grad_accum_steps`, and step limits identical.
+- **Slurm specifics**: always set `RUN_DIR` to a writable scratch path.
+- **NCCL logs are expensive**: `NCCL_LOGS=1` produces large per-rank logs and can slow runs.
+
+## Git Commit Checklist:
+
+Recommended to commit (small, reviewer-friendly):
+- `README.md`, `src/`, `scripts/`, `tests/`
+- Run summaries / small proof artifacts: `training_metrics.json`, `RUN_COMPLETE.txt`, `launcher_metadata.json`, `ibstat.txt`, `topo.txt`, `nccl_topo.xml`, `profiles/profile_summary.json`, `profiles/nsys_stats_*.txt`
+
+Recommended to exclude (large binaries):
+- Checkpoints (`epoch-*`), full `benchmarks/` scratch runs
+- Nsight binaries (`*.nsys-rep`) and large DBs (`*.sqlite`)

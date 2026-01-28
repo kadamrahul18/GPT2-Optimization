@@ -9,6 +9,3 @@ requests
 matplotlib
 seaborn
 pytest
-
-# Optional (FlashAttention experiments)
-triton

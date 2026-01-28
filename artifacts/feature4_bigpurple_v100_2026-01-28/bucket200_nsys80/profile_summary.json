@@ -1,0 +1,178 @@
+{
+  "generated_at_utc": "2026-01-28T01:29:15Z",
+  "run_dir": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_bucket200_nsys80",
+  "slurm_job_id": "17776175",
+  "hosts": [
+    "gn-0013",
+    "gn-0014"
+  ],
+  "world_size": 8,
+  "gpu": "Tesla V100-SXM2-16GB",
+  "cuda": "12.8",
+  "torch": "2.9.1+cu128",
+  "deepspeed": "0.18.3",
+  "seq_length": 512,
+  "micro_batch_size_per_gpu": 2,
+  "grad_accum_steps": 2,
+  "tokens_per_sec": 24090.970375952675,
+  "total_wall_time_sec": 29.01996898651123,
+  "nsys_report": "nsys_17776175_gn-0013.nsys-rep",
+  "inputs": [
+    "nsys_stats_gn-0013.txt"
+  ],
+  "nvtx_top5": [
+    {
+      "kind": "nvtx",
+      "name": ":train/backward",
+      "time_percent": 24.5,
+      "total_time": "62142570603 ns",
+      "raw": "     24.5  62,14,25,70,603        320    19,41,95,533.1    14,19,66,898.0     3,14,93,573  4,34,96,37,896  34,82,10,643.2  PushPop  :train/backward                     "
+    },
+    {
+      "kind": "nvtx",
+      "name": ":DeepSpeedEngine.backward",
+      "time_percent": 24.5,
+      "total_time": "62133803775 ns",
+      "raw": "     24.5  62,13,38,03,775        320    19,41,68,136.8    14,19,44,361.0     3,14,72,472  4,34,95,81,113  34,82,07,645.6  PushPop  :DeepSpeedEngine.backward           "
+    },
+    {
+      "kind": "nvtx",
+      "name": ":DeepSpeedEngine.allreduce_gradients",
+      "time_percent": 16.8,
+      "total_time": "42592466395 ns",
+      "raw": "     16.8  42,59,24,66,395        320    13,31,01,457.5     3,35,86,866.0          13,542  4,29,72,00,762  34,14,26,928.0  PushPop  :DeepSpeedEngine.allreduce_gradients"
+    },
+    {
+      "kind": "nvtx",
+      "name": ":train/optimizer_step",
+      "time_percent": 10.7,
+      "total_time": "27130209280 ns",
+      "raw": "     10.7  27,13,02,09,280        320     8,47,81,904.0     1,46,49,540.0        6,74,442    67,79,74,718  10,80,89,596.8  PushPop  :train/optimizer_step               "
+    },
+    {
+      "kind": "nvtx",
+      "name": "NCCL:ncclAllReduce",
+      "time_percent": 8.3,
+      "total_time": "21123057501 ns",
+      "raw": "      8.3  21,12,30,57,501        520     4,06,21,264.4          64,280.0          34,841  4,39,08,92,370  36,05,23,026.9  PushPop  NCCL:ncclAllReduce                  "
+    }
+  ],
+  "osrt_top5": [
+    {
+      "kind": "osrt",
+      "name": "poll",
+      "time_percent": 35.4,
+      "total_time": "4956780398040 ns",
+      "raw": "     35.4  49,56,78,03,98,040   1,29,400      3,83,05,876.3            2,810.0         1,487     5,01,12,19,743     13,94,06,400.1  poll                  "
+    },
+    {
+      "kind": "osrt",
+      "name": "pthread_cond_timedwait",
+      "time_percent": 21.4,
+      "total_time": "2995604627339 ns",
+      "raw": "     21.4  29,95,60,46,27,339     17,330     17,28,56,585.5     10,09,44,636.5         1,861  1,86,01,13,14,789   2,82,88,52,404.5  pthread_cond_timedwait"
+    },
+    {
+      "kind": "osrt",
+      "name": "sem_wait",
+      "time_percent": 11.5,
+      "total_time": "1608259808339 ns",
+      "raw": "     11.5  16,08,25,98,08,339        801   2,00,78,14,991.7     48,88,34,179.0        36,436  2,84,07,40,88,242  14,92,62,09,701.2  sem_wait              "
+    },
+    {
+      "kind": "osrt",
+      "name": "sem_timedwait",
+      "time_percent": 10.2,
+      "total_time": "1427474888515 ns",
+      "raw": "     10.2  14,27,47,48,88,515        407   3,50,73,09,308.4   4,00,07,55,351.0        14,311     5,00,98,80,819   1,50,97,14,636.3  sem_timedwait         "
+    },
+    {
+      "kind": "osrt",
+      "name": "pthread_cond_wait",
+      "time_percent": 6.1,
+      "total_time": "848619135497 ns",
+      "raw": "      6.1   8,48,61,91,35,497        881     96,32,45,329.7      5,02,97,747.0        12,677  1,62,78,72,86,742   8,44,32,43,488.3  pthread_cond_wait     "
+    }
+  ],
+  "likely_bottleneck": {
+    "allreduce_gradients_over_20pct": false
+  },
+  "per_file": {
+    "nsys_stats_gn-0013.txt": {
+      "nvtx_top5": [
+        {
+          "kind": "nvtx",
+          "name": ":train/backward",
+          "time_percent": 24.5,
+          "total_time": "62142570603 ns",
+          "raw": "     24.5  62,14,25,70,603        320    19,41,95,533.1    14,19,66,898.0     3,14,93,573  4,34,96,37,896  34,82,10,643.2  PushPop  :train/backward                     "
+        },
+        {
+          "kind": "nvtx",
+          "name": ":DeepSpeedEngine.backward",
+          "time_percent": 24.5,
+          "total_time": "62133803775 ns",
+          "raw": "     24.5  62,13,38,03,775        320    19,41,68,136.8    14,19,44,361.0     3,14,72,472  4,34,95,81,113  34,82,07,645.6  PushPop  :DeepSpeedEngine.backward           "
+        },
+        {
+          "kind": "nvtx",
+          "name": ":DeepSpeedEngine.allreduce_gradients",
+          "time_percent": 16.8,
+          "total_time": "42592466395 ns",
+          "raw": "     16.8  42,59,24,66,395        320    13,31,01,457.5     3,35,86,866.0          13,542  4,29,72,00,762  34,14,26,928.0  PushPop  :DeepSpeedEngine.allreduce_gradients"
+        },
+        {
+          "kind": "nvtx",
+          "name": ":train/optimizer_step",
+          "time_percent": 10.7,
+          "total_time": "27130209280 ns",
+          "raw": "     10.7  27,13,02,09,280        320     8,47,81,904.0     1,46,49,540.0        6,74,442    67,79,74,718  10,80,89,596.8  PushPop  :train/optimizer_step               "
+        },
+        {
+          "kind": "nvtx",
+          "name": "NCCL:ncclAllReduce",
+          "time_percent": 8.3,
+          "total_time": "21123057501 ns",
+          "raw": "      8.3  21,12,30,57,501        520     4,06,21,264.4          64,280.0          34,841  4,39,08,92,370  36,05,23,026.9  PushPop  NCCL:ncclAllReduce                  "
+        }
+      ],
+      "osrt_top5": [
+        {
+          "kind": "osrt",
+          "name": "poll",
+          "time_percent": 35.4,
+          "total_time": "4956780398040 ns",
+          "raw": "     35.4  49,56,78,03,98,040   1,29,400      3,83,05,876.3            2,810.0         1,487     5,01,12,19,743     13,94,06,400.1  poll                  "
+        },
+        {
+          "kind": "osrt",
+          "name": "pthread_cond_timedwait",
+          "time_percent": 21.4,
+          "total_time": "2995604627339 ns",
+          "raw": "     21.4  29,95,60,46,27,339     17,330     17,28,56,585.5     10,09,44,636.5         1,861  1,86,01,13,14,789   2,82,88,52,404.5  pthread_cond_timedwait"
+        },
+        {
+          "kind": "osrt",
+          "name": "sem_wait",
+          "time_percent": 11.5,
+          "total_time": "1608259808339 ns",
+          "raw": "     11.5  16,08,25,98,08,339        801   2,00,78,14,991.7     48,88,34,179.0        36,436  2,84,07,40,88,242  14,92,62,09,701.2  sem_wait              "
+        },
+        {
+          "kind": "osrt",
+          "name": "sem_timedwait",
+          "time_percent": 10.2,
+          "total_time": "1427474888515 ns",
+          "raw": "     10.2  14,27,47,48,88,515        407   3,50,73,09,308.4   4,00,07,55,351.0        14,311     5,00,98,80,819   1,50,97,14,636.3  sem_timedwait         "
+        },
+        {
+          "kind": "osrt",
+          "name": "pthread_cond_wait",
+          "time_percent": 6.1,
+          "total_time": "848619135497 ns",
+          "raw": "      6.1   8,48,61,91,35,497        881     96,32,45,329.7      5,02,97,747.0        12,677  1,62,78,72,86,742   8,44,32,43,488.3  pthread_cond_wait     "
+        }
+      ]
+    }
+  }
+}

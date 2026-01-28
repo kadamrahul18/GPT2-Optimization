@@ -16,15 +16,26 @@ import copy
 import torch.distributed as dist
 import tiktoken
 import metrics as metrics_utils
+from contextlib import contextmanager
 
 from transformers import GPT2Tokenizer
 
 def get_dist_info(args):
-    local_rank = int(os.environ.get("LOCAL_RANK", getattr(args, "local_rank", 0)))
-    if local_rank < 0:
-        local_rank = 0
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    env_local_rank = os.environ.get("LOCAL_RANK")
+    if env_local_rank is not None:
+        local_rank = int(env_local_rank)
+    else:
+        arg_local_rank = getattr(args, "local_rank", None)
+        if arg_local_rank is not None and int(arg_local_rank) >= 0:
+            local_rank = int(arg_local_rank)
+        else:
+            local_rank = 0
+
+    env_rank = os.environ.get("RANK")
+    rank = int(env_rank) if env_rank is not None else 0
+
+    env_world_size = os.environ.get("WORLD_SIZE")
+    world_size = int(env_world_size) if env_world_size is not None else 1
     return local_rank, rank, world_size
 
 
@@ -72,6 +83,79 @@ def graceful_distributed_shutdown():
         )
         return False
 
+
+def build_launcher_metadata(trainer, checkpoint_path):
+    import socket
+
+    def collect_prefixed_env(prefixes):
+        out = {}
+        for key, value in os.environ.items():
+            if any(key.startswith(prefix) for prefix in prefixes):
+                out[key] = value
+        return out
+
+    slurm = {
+        "job_id": os.getenv("SLURM_JOB_ID"),
+        "nodelist": os.getenv("SLURM_NODELIST") or os.getenv("SLURM_JOB_NODELIST"),
+        "hosts": os.getenv("SLURM_HOSTS"),
+    }
+    slurm = {k: v for k, v in slurm.items() if v}
+
+    env_summary = {
+        "CUDA_VISIBLE_DEVICES": os.getenv("CUDA_VISIBLE_DEVICES"),
+        "MASTER_ADDR": os.getenv("MASTER_ADDR"),
+        "MASTER_PORT": os.getenv("MASTER_PORT"),
+    }
+    env_summary = {k: v for k, v in env_summary.items() if v}
+
+    return {
+        "checkpoint_path": checkpoint_path,
+        "rank0_host": socket.gethostname(),
+        "world_size": trainer.world_size,
+        "git_commit": os.getenv("GIT_COMMIT") or trainer.metrics.get("git_commit", "unknown"),
+        "slurm": slurm,
+        "env": env_summary,
+        "nccl_env": collect_prefixed_env(["NCCL_", "TORCH_NCCL_"]),
+    }
+
+
+def clean_distributed_shutdown(global_rank):
+    import threading
+
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    if dist.is_available() and dist.is_initialized():
+        dist_debug = os.getenv("DIST_DEBUG", "0") == "1"
+        timeout_sec = int(os.getenv("DIST_SHUTDOWN_TIMEOUT_SEC", "30"))
+        # NOTE: Do not call dist.barrier() during shutdown. If any rank is delayed (e.g., profiler flush),
+        # an in-flight barrier/allreduce can trigger the NCCL watchdog and abort the process.
+
+        def _destroy_pg():
+            try:
+                if dist_debug:
+                    print(f"[Rank {global_rank}] SHUTDOWN_ENTER destroy_process_group", flush=True)
+                dist.destroy_process_group()
+                if dist_debug:
+                    print(f"[Rank {global_rank}] SHUTDOWN_EXIT  destroy_process_group", flush=True)
+            except Exception as e:
+                print(f"[Rank {global_rank}] Warning: destroy_process_group failed: {e}", flush=True)
+
+        try:
+            t = threading.Thread(target=_destroy_pg, daemon=True)
+            t.start()
+            t.join(timeout=timeout_sec)
+            if t.is_alive():
+                print(
+                    f"[Rank {global_rank}] Warning: destroy_process_group timed out after {timeout_sec}s; exiting anyway.",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"[Rank {global_rank}] Warning: shutdown cleanup failed: {e}", flush=True)
+
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size, embedding_size):
         super(TokenEmbedding, self).__init__()
@@ -89,13 +173,12 @@ class PositionalEmbedding(nn.Module):
         return self.position_embeddings(position_ids)
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, embedding_size, num_heads, dropout, use_flash_attention=False):
+    def __init__(self, embedding_size, num_heads, dropout):
         super(MultiHeadSelfAttention, self).__init__()
         assert embedding_size % num_heads == 0, "Embedding size must be divisible by num_heads"
 
         self.num_heads = num_heads
         self.head_dim = embedding_size // num_heads
-        self.use_flash_attention = use_flash_attention
         self.embedding_size = embedding_size
 
         self.query = nn.Linear(embedding_size, embedding_size)
@@ -115,22 +198,14 @@ class MultiHeadSelfAttention(nn.Module):
         K = K.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         V = V.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
 
-        if self.use_flash_attention:
-            try:
-                from FlashAttention import attention
-                sm_scale = 1.0 / math.sqrt(self.head_dim)
-                attn_output = attention(Q.contiguous(), K.contiguous(), V.contiguous(), True, sm_scale)
-            except ImportError:
-                 raise ImportError("FlashAttention not found or installed correctly. Cannot use use_flash_attention=True.")
-        else:
-            attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
 
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
 
-            attn_weights = torch.softmax(attn_weights, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, V)
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        attn_output = torch.matmul(attn_weights, V)
 
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_length, embed_dim)
         output = self.out(attn_output)
@@ -151,10 +226,10 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embedding_size, num_heads, dropout, use_flash_attention):
+    def __init__(self, embedding_size, num_heads, dropout):
         super(TransformerBlock, self).__init__()
         self.ln1 = nn.LayerNorm(embedding_size, eps=1e-5)
-        self.attn = MultiHeadSelfAttention(embedding_size, num_heads, dropout, use_flash_attention)
+        self.attn = MultiHeadSelfAttention(embedding_size, num_heads, dropout)
         self.ln2 = nn.LayerNorm(embedding_size, eps=1e-5)
         self.ffn = FeedForward(embedding_size, dropout)
 
@@ -164,16 +239,15 @@ class TransformerBlock(nn.Module):
         return x
 
 class GPT2Model(nn.Module):
-    def __init__(self, vocab_size, embedding_size, num_layers, num_heads, dropout, max_position_embeddings, use_flash_attention=False):
+    def __init__(self, vocab_size, embedding_size, num_layers, num_heads, dropout, max_position_embeddings):
         super(GPT2Model, self).__init__()
         self.token_embedding = TokenEmbedding(vocab_size, embedding_size)
         self.position_embedding = PositionalEmbedding(max_position_embeddings, embedding_size)
         self.dropout = nn.Dropout(dropout)
         self.max_position_embeddings = max_position_embeddings
-        self.use_flash_attention = use_flash_attention
 
         self.blocks = nn.ModuleList([
-            TransformerBlock(embedding_size, num_heads, dropout, use_flash_attention) for _ in range(num_layers)
+            TransformerBlock(embedding_size, num_heads, dropout) for _ in range(num_layers)
         ])
 
         self.ln_f = nn.LayerNorm(embedding_size, eps=1e-5)
@@ -190,11 +264,11 @@ class GPT2Model(nn.Module):
         hidden_states = token_embeddings + position_embeddings
         hidden_states = self.dropout(hidden_states)
 
-        if attention_mask is None and not self.use_flash_attention:
-             mask = torch.tril(torch.ones((seq_length, seq_length), dtype=torch.bool, device=input_ids.device))
-             attention_mask = mask.unsqueeze(0).unsqueeze(0)
-             attention_mask = attention_mask.to(dtype=hidden_states.dtype)
-             attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
+        if attention_mask is None:
+            mask = torch.tril(torch.ones((seq_length, seq_length), dtype=torch.bool, device=input_ids.device))
+            attention_mask = mask.unsqueeze(0).unsqueeze(0)
+            attention_mask = attention_mask.to(dtype=hidden_states.dtype)
+            attention_mask = (1.0 - attention_mask) * torch.finfo(hidden_states.dtype).min
 
         
         for block in self.blocks:
@@ -264,6 +338,9 @@ class GPT2Trainer:
         self.args = args
         self.start_epoch = 0
         self.log_interval = args.steps_per_print
+        self.debug_collectives = os.getenv("DIST_DEBUG", "0") == "1"
+        self.collective_seq = 0
+        self.profile_mode = bool(getattr(args, "profile_mode", False)) or os.getenv("PROFILE_MODE", "0") == "1"
 
         self.local_rank, self.global_rank, self.world_size = get_dist_info(args)
         if torch.cuda.is_available():
@@ -272,7 +349,16 @@ class GPT2Trainer:
         else:
             self.current_device = torch.device("cpu")
 
-        self.use_deepspeed = args.run_type == "optimized" or os.getenv("LOCAL_RANK") is not None
+        distributed_env = (
+            int(os.getenv("WORLD_SIZE", "1")) > 1
+            or os.getenv("RANK") is not None
+            or os.getenv("LOCAL_RANK") is not None
+        )
+        self.use_deepspeed = args.run_type == "optimized" or distributed_env
+        if args.num_workers is not None:
+            self.num_workers = int(args.num_workers)
+        else:
+            self.num_workers = 0 if distributed_env else 2
         if self.use_deepspeed and not dist.is_initialized():
             try:
                 if self.args.quiet_nccl_monitor:
@@ -303,6 +389,86 @@ class GPT2Trainer:
                 print(f"[Rank {self.global_rank}]", *print_args, **kwargs)
 
         self.rank_print = rank_print
+        self.debug_log_path = None
+        self._debug_log_fh = None
+        if self.debug_collectives:
+            try:
+                log_dir = os.path.join(self.args.checkpoint_path, "rank_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                self.debug_log_path = os.path.join(log_dir, f"rank{self.global_rank}.log")
+                self._debug_log_fh = open(self.debug_log_path, "a", encoding="utf-8")
+            except Exception:
+                self._debug_log_fh = None
+
+        def debug_print(*print_args, **kwargs):
+            if not self.debug_collectives:
+                return
+            msg = " ".join(str(x) for x in print_args)
+            prefix = f"[Rank {self.global_rank}]"
+            print(prefix, msg, flush=True, **kwargs)
+            if self._debug_log_fh is not None:
+                try:
+                    self._debug_log_fh.write(prefix + " " + msg + "\n")
+                    self._debug_log_fh.flush()
+                except Exception:
+                    pass
+
+        self.debug_print = debug_print
+
+        def next_collective_seq():
+            self.collective_seq += 1
+            return self.collective_seq
+
+        self.next_collective_seq = next_collective_seq
+
+        def dist_ready():
+            return dist.is_available() and dist.is_initialized()
+
+        self.dist_ready = dist_ready
+
+        def dist_barrier(tag):
+            if not self.dist_ready():
+                return
+            seq = self.next_collective_seq()
+            self.debug_print(f"COLL_ENTER seq={seq} op=barrier tag={tag}")
+            dist.barrier()
+            self.debug_print(f"COLL_EXIT  seq={seq} op=barrier tag={tag}")
+
+        self.dist_barrier = dist_barrier
+
+        def dist_all_reduce(tensor, op, tag):
+            if not self.dist_ready():
+                return
+            seq = self.next_collective_seq()
+            try:
+                shape = tuple(tensor.shape)
+            except Exception:
+                shape = "unknown"
+            self.debug_print(
+                f"COLL_ENTER seq={seq} op=all_reduce tag={tag} dtype={getattr(tensor, 'dtype', 'unknown')} shape={shape}"
+            )
+            dist.all_reduce(tensor, op=op)
+            self.debug_print(f"COLL_EXIT  seq={seq} op=all_reduce tag={tag}")
+
+        self.dist_all_reduce = dist_all_reduce
+
+        @contextmanager
+        def nvtx_range(name: str):
+            if self.profile_mode and torch.cuda.is_available():
+                try:
+                    torch.cuda.nvtx.range_push(name)
+                except Exception:
+                    pass
+            try:
+                yield
+            finally:
+                if self.profile_mode and torch.cuda.is_available():
+                    try:
+                        torch.cuda.nvtx.range_pop()
+                    except Exception:
+                        pass
+
+        self.nvtx_range = nvtx_range
 
         self.rank_print(f"Initializing GPT2Trainer on Global Rank {self.global_rank}, Local Rank {self.local_rank}, World Size {self.world_size}, Device {self.current_device}")
 
@@ -314,7 +480,6 @@ class GPT2Trainer:
             num_heads=args.num_heads,
             dropout=args.dropout,
             max_position_embeddings=args.max_position_embeddings,
-            use_flash_attention=args.use_flash_attention if hasattr(args, 'use_flash_attention') else False
         )
         self.rank_print("GPT-2 Model Initialized.")
 
@@ -391,12 +556,43 @@ class GPT2Trainer:
             self.rank_print("Initializing DeepSpeed engine...")
             try:
                  import deepspeed
-                 self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
-                     model=self.model,
-                     model_parameters=self.model.parameters(),
-                     training_data=self.train_dataset,
-                     config=deepspeed_config
+                 train_sampler = None
+                 if self.world_size > 1:
+                     train_sampler = DistributedSampler(
+                         self.train_dataset,
+                         num_replicas=self.world_size,
+                         rank=self.global_rank,
+                         shuffle=True,
+                     )
+                 train_dataloader = DataLoader(
+                     self.train_dataset,
+                     batch_size=self.micro_batch_size,
+                     shuffle=train_sampler is None,
+                     sampler=train_sampler,
+                     num_workers=self.num_workers,
+                     pin_memory=True,
+                     drop_last=True,
                  )
+                 try:
+                     self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
+                         model=self.model,
+                         model_parameters=self.model.parameters(),
+                         training_dataloader=train_dataloader,
+                         config=deepspeed_config
+                     )
+                 except TypeError:
+                     if self.global_rank == 0:
+                         print(
+                             "[Rank 0] DeepSpeed initialize() does not support training_dataloader; "
+                             "falling back to training_data.",
+                             flush=True,
+                         )
+                     self.model_engine, self.optimizer, self.train_dataloader, self.scheduler = deepspeed.initialize(
+                         model=self.model,
+                         model_parameters=self.model.parameters(),
+                         training_data=self.train_dataset,
+                         config=deepspeed_config
+                     )
                  self.rank_print("DeepSpeed Engine Initialized Successfully.")
                  self.rank_print(f"Using device: {self.model_engine.local_rank} (mapped to {self.current_device})")
             except Exception as e:
@@ -420,7 +616,7 @@ class GPT2Trainer:
                 self.train_dataset,
                 batch_size=self.micro_batch_size,
                 shuffle=True,
-                num_workers=2,
+                num_workers=self.num_workers,
                 pin_memory=True,
                 drop_last=True,
             )
@@ -428,16 +624,23 @@ class GPT2Trainer:
 
         if dist.is_available() and dist.is_initialized():
              self.rank_print("Waiting at barrier after DeepSpeed initialization...")
-             dist.barrier()
+             self.dist_barrier("post_deepspeed_init")
              self.rank_print("Passed barrier after DeepSpeed initialization.")
 
         if len(self.val_dataset) > 0:
-            val_sampler = DistributedSampler(self.val_dataset, num_replicas=self.world_size, rank=self.global_rank, shuffle=False)
+            val_sampler = None
+            if self.world_size > 1:
+                val_sampler = DistributedSampler(
+                    self.val_dataset,
+                    num_replicas=self.world_size,
+                    rank=self.global_rank,
+                    shuffle=False,
+                )
             self.val_dataloader = DataLoader(
                 self.val_dataset,
                 batch_size=self.micro_batch_size,
                 sampler=val_sampler,
-                num_workers=2,
+                num_workers=self.num_workers,
                 pin_memory=True,
                 drop_last=True
             )
@@ -445,6 +648,10 @@ class GPT2Trainer:
         else:
              self.rank_print("Validation dataset is empty, skipping validation dataloader creation.")
              self.val_dataloader = None
+        if self.debug_collectives and self.dist_ready():
+            val_len = len(self.val_dataloader) if self.val_dataloader is not None else -1
+            train_len = len(self.train_dataloader) if self.train_dataloader is not None else -1
+            self.debug_print(f"DATA_INFO train_dataloader_len={train_len} val_dataloader_len={val_len}")
 
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.metrics = metrics_utils.build_initial_metrics(
@@ -493,7 +700,7 @@ class GPT2Trainer:
 
         if dist.is_available() and dist.is_initialized():
             self.rank_print("Waiting at barrier before training loop...")
-            dist.barrier()
+            self.dist_barrier("pre_training_loop")
             self.rank_print("Passed barrier, entering training loop.")
 
         if self.global_rank == 0:
@@ -502,7 +709,7 @@ class GPT2Trainer:
         for epoch in range(self.start_epoch, self.args.epochs):
             self.rank_print(f"Starting Epoch {epoch + 1}/{self.args.epochs}")
             if dist.is_available() and dist.is_initialized():
-                 dist.barrier()
+                 self.dist_barrier(f"epoch_{epoch+1}_start")
 
             if torch.cuda.is_available():
                  torch.cuda.reset_peak_memory_stats(self.current_device)
@@ -521,7 +728,8 @@ class GPT2Trainer:
 
             progress_bar = None
             if self.global_rank == 0:
-                 progress_bar = tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{self.args.epochs} Rank 0")
+                 if not self.profile_mode:
+                      progress_bar = tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{self.args.epochs} Rank 0")
 
 
             total_train_loss_epoch = 0.0
@@ -530,31 +738,27 @@ class GPT2Trainer:
             step_time_samples = []
             dataload_time_samples = []
             cuda_step_time_samples = []
-            timing_warmup_steps = 5
-            timing_sample_every = 50
+            cuda_step_event_pairs = []
+            timing_warmup_steps = int(getattr(self.args, "timing_warmup_steps", 5))
+            timing_sample_every = int(getattr(self.args, "timing_sample_every", 50))
 
             if dist.is_available() and dist.is_initialized():
                  self.rank_print(f"Waiting at barrier: Start of Epoch {epoch+1} loop...")
-                 dist.barrier()
+                 self.dist_barrier(f"epoch_{epoch+1}_loop_start")
                  self.rank_print(f"Passed barrier: Start of Epoch {epoch+1} loop.")
 
 
             train_iter = iter(self.train_dataloader)
             total_steps_in_epoch = len(self.train_dataloader)
+            if getattr(self.args, "max_train_steps", None) is not None:
+                total_steps_in_epoch = min(total_steps_in_epoch, int(self.args.max_train_steps))
             for step in range(total_steps_in_epoch):
-                 if dist.is_available() and dist.is_initialized():
-                      if step % 50 == 0:
-                           print(f"[Rank {self.global_rank}] Waiting at barrier: Start of Step {step}, Epoch {epoch+1}")
-                      dist.barrier()
-                      if step % 50 == 0:
-                           print(f"[Rank {self.global_rank}] Passed barrier: Start of Step {step}, Epoch {epoch+1}")
-
-
                  dataload_start = time.perf_counter()
-                 try:
-                      batch = next(train_iter)
-                 except StopIteration:
-                      break
+                 with self.nvtx_range("train/dataload"):
+                     try:
+                          batch = next(train_iter)
+                     except StopIteration:
+                          break
                  dataload_end = time.perf_counter()
                  input_ids, targets = batch
                  input_ids = input_ids.to(self.current_device)
@@ -571,73 +775,61 @@ class GPT2Trainer:
                       step_start = time.perf_counter()
                       if start_event is not None:
                            start_event.record()
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting forward pass, Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
-                      if self.use_deepspeed:
-                           outputs = self.model_engine(*inputs)
-                      else:
-                           with torch.cuda.amp.autocast(enabled=self.use_amp):
+                      with self.nvtx_range("train/forward"):
+                           if self.use_deepspeed:
                                 outputs = self.model_engine(*inputs)
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed forward pass, Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
+                           else:
+                                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                                     outputs = self.model_engine(*inputs)
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during forward pass: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  try:
                       outputs = outputs.contiguous()
-                      loss = F.cross_entropy(
-                          outputs.view(-1, self.args.vocab_size), targets.view(-1)
-                      )
+                      with self.nvtx_range("train/loss"):
+                           loss = F.cross_entropy(
+                               outputs.view(-1, self.args.vocab_size), targets.view(-1)
+                           )
                       batch_loss = loss.item()
                       batch_tokens = input_ids.numel()
-                      if step % 50 == 0 or step < 5:
-                          print(f"[Rank {self.global_rank}]: Computed loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
                  except Exception as e:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during loss computation: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  try:
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting backward pass, Step {step}, Epoch {epoch+1}")
-                      if self.use_deepspeed:
-                           self.model_engine.backward(loss)
-                      else:
-                           loss_to_backprop = loss / max(1, self.grad_accum_steps)
-                           if self.use_amp:
-                                self.scaler.scale(loss_to_backprop).backward()
+                      with self.nvtx_range("train/backward"):
+                           if self.use_deepspeed:
+                                self.model_engine.backward(loss)
                            else:
-                                loss_to_backprop.backward()
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed backward pass, Step {step}, Epoch {epoch+1}")
-
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Starting optimizer step, Step {step}, Epoch {epoch+1}")
-                      if self.use_deepspeed:
-                           self.model_engine.step()
-                      else:
-                           should_step = ((step + 1) % max(1, self.grad_accum_steps) == 0) or (step + 1 == total_steps_in_epoch)
-                           if should_step:
-                                grad_clip = self.deepspeed_config.get("gradient_clipping")
-                                if grad_clip:
-                                     if self.use_amp:
-                                          self.scaler.unscale_(self.optimizer)
-                                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                                loss_to_backprop = loss / max(1, self.grad_accum_steps)
                                 if self.use_amp:
-                                     self.scaler.step(self.optimizer)
-                                     self.scaler.update()
+                                     self.scaler.scale(loss_to_backprop).backward()
                                 else:
-                                     self.optimizer.step()
-                                self.optimizer.zero_grad(set_to_none=True)
-                      if step % 50 == 0 or step < 5:
-                           print(f"[Rank {self.global_rank}]: Completed optimizer step, Step {step}, Epoch {epoch+1}")
+                                     loss_to_backprop.backward()
+
+                      with self.nvtx_range("train/optimizer_step"):
+                           if self.use_deepspeed:
+                                self.model_engine.step()
+                           else:
+                                should_step = ((step + 1) % max(1, self.grad_accum_steps) == 0) or (step + 1 == total_steps_in_epoch)
+                                if should_step:
+                                     grad_clip = self.deepspeed_config.get("gradient_clipping")
+                                     if grad_clip:
+                                          if self.use_amp:
+                                               self.scaler.unscale_(self.optimizer)
+                                          torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                                     if self.use_amp:
+                                          self.scaler.step(self.optimizer)
+                                          self.scaler.update()
+                                     else:
+                                          self.optimizer.step()
+                                     self.optimizer.zero_grad(set_to_none=True)
                       if end_event is not None:
                            end_event.record()
                       step_end = time.perf_counter()
@@ -646,16 +838,13 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during backward/step: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       sys.exit(1)
 
                  if sample_timing:
                       step_time_samples.append(step_end - step_start)
                       dataload_time_samples.append(dataload_end - dataload_start)
                       if start_event is not None and end_event is not None:
-                           torch.cuda.synchronize()
-                           cuda_ms = start_event.elapsed_time(end_event)
-                           cuda_step_time_samples.append(cuda_ms / 1000.0)
+                           cuda_step_event_pairs.append((start_event, end_event))
 
                  total_train_loss_epoch += batch_loss * batch_tokens
                  num_tokens_processed_epoch += batch_tokens
@@ -667,22 +856,30 @@ class GPT2Trainer:
                            progress_bar.set_postfix(loss=batch_loss)
 
                       if step % self.log_interval == 0:
-                           try:
-                                memory_stats = torch.cuda.memory_stats(self.current_device)
-                                peak_memory_mb = memory_stats.get("allocated_bytes.all.peak", 0) / (1024**2)
-                                current_memory_mb = memory_stats.get("allocated_bytes.all.current", 0) / (1024**2)
-                                self.rank_print(f"Step {step}, Loss: {batch_loss:.4f}, Mem Curr: {current_memory_mb:.2f}MB, Mem Peak: {peak_memory_mb:.2f}MB")
-                                if step == 0 and epoch == 0:
-                                      torch.cuda.reset_peak_memory_stats(self.current_device)
-                                      self.rank_print("Reset peak memory stats after first step.")
-                           except Exception as mem_e:
-                                self.rank_print(f"Warning: Could not get memory stats: {mem_e}")
+                           if not self.profile_mode:
+                                try:
+                                     memory_stats = torch.cuda.memory_stats(self.current_device)
+                                     peak_memory_mb = memory_stats.get("allocated_bytes.all.peak", 0) / (1024**2)
+                                     current_memory_mb = memory_stats.get("allocated_bytes.all.current", 0) / (1024**2)
+                                     self.rank_print(f"Step {step}, Loss: {batch_loss:.4f}, Mem Curr: {current_memory_mb:.2f}MB, Mem Peak: {peak_memory_mb:.2f}MB")
+                                     if step == 0 and epoch == 0:
+                                           torch.cuda.reset_peak_memory_stats(self.current_device)
+                                           self.rank_print("Reset peak memory stats after first step.")
+                                except Exception as mem_e:
+                                     self.rank_print(f"Warning: Could not get memory stats: {mem_e}")
 
                  if prof:
                       prof.step()
 
+            if self.global_rank == 0 and cuda_step_event_pairs and torch.cuda.is_available():
+                # Avoid per-sample cudaEventSynchronize() overhead: synchronize once, then read all event durations.
+                torch.cuda.synchronize()
+                for start_event, end_event in cuda_step_event_pairs:
+                    cuda_ms = start_event.elapsed_time(end_event)
+                    cuda_step_time_samples.append(cuda_ms / 1000.0)
+
             if dist.is_available() and dist.is_initialized():
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_train_loop_end")
 
             if dist.is_available() and dist.is_initialized():
                 loss_tokens = torch.tensor(
@@ -690,13 +887,13 @@ class GPT2Trainer:
                     device=self.current_device,
                     dtype=torch.float64,
                 )
-                dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+                self.dist_all_reduce(loss_tokens, op=dist.ReduceOp.SUM, tag=f"epoch_{epoch+1}_train_loss_tokens_sum")
                 steps_tensor = torch.tensor(
                     [num_steps_epoch],
                     device=self.current_device,
                     dtype=torch.float64,
                 )
-                dist.all_reduce(steps_tensor, op=dist.ReduceOp.MAX)
+                self.dist_all_reduce(steps_tensor, op=dist.ReduceOp.MAX, tag=f"epoch_{epoch+1}_train_steps_max")
                 global_steps = int(steps_tensor.item())
                 global_loss_sum = loss_tokens[0].item()
                 global_tokens = loss_tokens[1].item()
@@ -718,7 +915,7 @@ class GPT2Trainer:
                         device=self.current_device,
                         dtype=torch.float64,
                     )
-                    dist.all_reduce(mem_tensor, op=dist.ReduceOp.MAX)
+                    self.dist_all_reduce(mem_tensor, op=dist.ReduceOp.MAX, tag=f"epoch_{epoch+1}_mem_max")
                     max_alloc_global = int(mem_tensor[0].item())
                     max_reserved_global = int(mem_tensor[1].item())
 
@@ -770,7 +967,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier before validation, Epoch {epoch+1}...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_pre_validation")
                 self.rank_print(f"Passed barrier, starting validation, Epoch {epoch+1}.")
 
             if self.val_dataloader:
@@ -783,7 +980,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier before checkpointing, Epoch {epoch+1}...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_pre_checkpoint")
                 self.rank_print(f"Passed barrier, proceeding with checkpointing, Epoch {epoch+1}.")
 
             if self.global_rank == 0:
@@ -804,7 +1001,7 @@ class GPT2Trainer:
 
             if dist.is_available() and dist.is_initialized():
                 self.rank_print(f"Waiting at barrier: End of Epoch {epoch+1} processing...")
-                dist.barrier()
+                self.dist_barrier(f"epoch_{epoch+1}_end")
                 self.rank_print(f"Passed barrier: End of Epoch {epoch+1} processing.")
 
 
@@ -846,10 +1043,13 @@ class GPT2Trainer:
 
         val_progress_bar = None
         if self.global_rank == 0:
-             val_progress_bar = tqdm(total=len(self.val_dataloader), desc=f"Validation Epoch {epoch+1} Rank 0")
+             if not self.profile_mode:
+                  val_progress_bar = tqdm(total=len(self.val_dataloader), desc=f"Validation Epoch {epoch+1} Rank 0")
 
         with torch.no_grad():
             for step, batch in enumerate(self.val_dataloader):
+                 if getattr(self.args, "max_val_steps", None) is not None and step >= int(self.args.max_val_steps):
+                      break
 
                  input_ids, targets = batch
                  input_ids = input_ids.to(self.current_device)
@@ -857,21 +1057,18 @@ class GPT2Trainer:
                  inputs = (input_ids, None)
 
                  try:
-                      if step % 20 == 0 or step < 3:
-                          print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Input Shape: {input_ids.shape}")
                       if self.use_deepspeed:
-                           outputs = self.model_engine(*inputs)
+                           with self.nvtx_range("val/forward"):
+                                outputs = self.model_engine(*inputs)
                       else:
                            with torch.cuda.amp.autocast(enabled=self.use_amp):
-                                outputs = self.model_engine(*inputs)
-                      if step % 20 == 0 or step < 3:
-                          print(f"[Rank {self.global_rank}]: Validation Step {step}, Epoch {epoch+1}, Output Shape: {outputs.shape}")
+                                with self.nvtx_range("val/forward"):
+                                     outputs = self.model_engine(*inputs)
 
-                      loss = F.cross_entropy(outputs.view(-1, self.args.vocab_size), targets.view(-1))
+                      with self.nvtx_range("val/loss"):
+                           loss = F.cross_entropy(outputs.view(-1, self.args.vocab_size), targets.view(-1))
                       batch_loss = loss.item()
                       batch_tokens = input_ids.numel()
-                      if step % 20 == 0 or step < 3:
-                           print(f"[Rank {self.global_rank}]: Validation Loss: {batch_loss:.4f}, Step {step}, Epoch {epoch+1}")
 
                       total_loss_sum += batch_loss * batch_tokens
                       total_tokens += batch_tokens
@@ -883,7 +1080,6 @@ class GPT2Trainer:
                       print(f"[Rank {self.global_rank}]: CRITICAL ERROR during validation: Step {step}, Epoch {epoch+1}: {e}")
                       import traceback
                       traceback.print_exc()
-                      if dist.is_available() and dist.is_initialized(): dist.barrier()
                       break
 
         if dist.is_available() and dist.is_initialized():
@@ -892,7 +1088,7 @@ class GPT2Trainer:
                 device=self.current_device,
                 dtype=torch.float64,
             )
-            dist.all_reduce(loss_tokens, op=dist.ReduceOp.SUM)
+            self.dist_all_reduce(loss_tokens, op=dist.ReduceOp.SUM, tag=f"epoch_{epoch+1}_val_loss_tokens_sum")
             global_loss_sum = loss_tokens[0].item()
             global_tokens = loss_tokens[1].item()
         else:
@@ -906,11 +1102,6 @@ class GPT2Trainer:
                 val_progress_bar.close()
             self.rank_print(f"Validation Finished Epoch {epoch+1}. Average Loss: {avg_loss:.4f}")
             return avg_loss
-
-        if dist.is_available() and dist.is_initialized():
-             self.rank_print(f"Waiting at barrier after validation, Epoch {epoch+1}...")
-             dist.barrier()
-             self.rank_print(f"Passed barrier after validation, Epoch {epoch+1}.")
         return None
 
 
@@ -989,9 +1180,6 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--max_position_embeddings', type=int, default=1024, help='Maximum sequence length model can handle')
     parser.add_argument('--seq_length', type=int, default=512, help='Sequence length for training data chunks')
-    parser.add_argument('--use_flash_attention', action='store_true', help='Use FlashAttention implementation')
-
-
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--train_micro_batch_size_per_gpu', type=int, default=4, help='Micro batch size per GPU (overridden by deepspeed config)')
     parser.add_argument('--micro_batch_size_per_gpu', type=int, default=None, help='Override micro batch size per GPU')
@@ -1012,13 +1200,19 @@ def main():
     parser.add_argument('--val_data_path', type=str, required=True, help='Path to the validation binary file (val.bin)')
 
     parser.add_argument('--deepspeed_config', type=str, required=True, help='Path to DeepSpeed config file')
-    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank passed by DeepSpeed launcher')
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=-1, help='Local rank passed by launcher')
 
     parser.add_argument('--run_type', type=str, choices=['baseline', 'optimized'], required=True, help='Type of run')
 
     # parser.add_argument('--pipeline_stages', type=int, default=1, help='Number of pipeline stages (overridden by deepspeed config)')
 
     parser.add_argument('--profile', action='store_true', help='Enable PyTorch profiler (logs saved in checkpoint_path/profiler_logs)')
+    parser.add_argument('--profile_mode', action='store_true', help='Enable profiling-friendly behavior (throttled logging, NVTX ranges)')
+    parser.add_argument('--max_train_steps', type=int, default=None, help='Limit training micro-steps per epoch (useful for profiling)')
+    parser.add_argument('--max_val_steps', type=int, default=None, help='Limit validation steps per epoch (useful for profiling)')
+    parser.add_argument('--timing_warmup_steps', type=int, default=5, help='Warmup steps before timing samples')
+    parser.add_argument('--timing_sample_every', type=int, default=50, help='Sample step timing every N steps')
+    parser.add_argument('--num_workers', type=int, default=None, help='DataLoader worker processes (default: 0 for distributed, 2 otherwise)')
 
 
     args = parser.parse_args()
@@ -1026,50 +1220,62 @@ def main():
     if args.quiet_nccl_monitor:
          os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
 
-
-    if args.local_rank == -1:
+    env_rank = os.environ.get("RANK")
+    rank = int(env_rank) if env_rank is not None else 0
+    env_world_size = os.environ.get("WORLD_SIZE")
+    world_size = int(env_world_size) if env_world_size is not None else 1
+    local_rank_env = os.environ.get("LOCAL_RANK")
+    local_rank_arg = getattr(args, "local_rank", None)
+    local_rank_missing = local_rank_env is None and (local_rank_arg is None or int(local_rank_arg) < 0)
+    if rank == 0 and world_size <= 1 and local_rank_missing:
          print("Warning: local_rank not set by launcher, running in non-distributed mode.")
-         pass
-    else:
-         pass
 
-    trainer = GPT2Trainer(args)
+    trainer = None
+    global_rank_for_shutdown = rank
+    try:
+        trainer = GPT2Trainer(args)
+        global_rank_for_shutdown = trainer.global_rank
 
-    trainer.train()
+        trainer.train()
 
-    if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        if trainer.global_rank == 0:
+            launcher_metadata_path = os.path.join(args.checkpoint_path, "launcher_metadata.json")
+            metrics_utils.write_json_atomic(
+                launcher_metadata_path,
+                build_launcher_metadata(trainer=trainer, checkpoint_path=args.checkpoint_path),
+            )
+            print(f"[Rank 0] LAUNCHER_METADATA_WRITE_DONE path={launcher_metadata_path}", flush=True)
 
-    if trainer.global_rank == 0:
-        timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        trainer.metrics["completion"] = {
-            "run_complete_file": "RUN_COMPLETE.txt",
-            "printed_marker": True,
-            "timestamp_utc": timestamp_utc,
-        }
-        trainer.metrics["shutdown"]["destroy_process_group_called"] = dist.is_available() and dist.is_initialized()
-        trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
+        if trainer.global_rank == 0:
+            timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            trainer.metrics["completion"] = {
+                "run_complete_file": "RUN_COMPLETE.txt",
+                "printed_marker": True,
+                "timestamp_utc": timestamp_utc,
+            }
+            trainer.metrics["shutdown"]["destroy_process_group_called"] = dist.is_available() and dist.is_initialized()
+            trainer.metrics["shutdown"]["quiet_nccl_monitor"] = args.quiet_nccl_monitor
 
-        metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
-        trainer.save_metrics(trainer.metrics, metrics_file_path)
-        print(f"[Rank 0] METRICS_WRITE_DONE path={metrics_file_path}", flush=True)
+            metrics_file_path = os.path.join(args.checkpoint_path, "training_metrics.json")
+            trainer.save_metrics(trainer.metrics, metrics_file_path)
+            print(f"[Rank 0] METRICS_WRITE_DONE path={metrics_file_path}", flush=True)
 
-    if trainer.global_rank == 0:
-        tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
-        total_wall_time = trainer.metrics.get("summary", {}).get("total_wall_time_sec")
-        run_complete_line = (
-            f"[Rank 0] RUN_COMPLETE checkpoint_path={args.checkpoint_path} "
-            f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
-            f"total_wall_time_sec={total_wall_time}"
-        )
-        run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
-        os.makedirs(args.checkpoint_path, exist_ok=True)
-        with open(run_complete_path, "w", encoding="utf-8") as f:
-            f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
-        print(run_complete_line, flush=True)
-
-    graceful_distributed_shutdown()
-    print(f"[Rank {trainer.global_rank}] EXITING cleanly", flush=True)
+        if trainer.global_rank == 0:
+            tokens_per_sec = trainer.metrics.get("summary", {}).get("mean_tokens_per_sec_global")
+            total_wall_time = trainer.metrics.get("summary", {}).get("total_wall_time_sec")
+            run_complete_line = (
+                f"[Rank 0] RUN_COMPLETE checkpoint_path={args.checkpoint_path} "
+                f"world_size={trainer.world_size} tokens_per_sec={tokens_per_sec} "
+                f"total_wall_time_sec={total_wall_time}"
+            )
+            run_complete_path = os.path.join(args.checkpoint_path, "RUN_COMPLETE.txt")
+            os.makedirs(args.checkpoint_path, exist_ok=True)
+            with open(run_complete_path, "w", encoding="utf-8") as f:
+                f.write(f"{run_complete_line} timestamp_utc={timestamp_utc}\n")
+            print(run_complete_line, flush=True)
+    finally:
+        clean_distributed_shutdown(global_rank=global_rank_for_shutdown)
+        print(f"[Rank {global_rank_for_shutdown}] EXITING cleanly", flush=True)
 
 if __name__ == '__main__':
     main()
