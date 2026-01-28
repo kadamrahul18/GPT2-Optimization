@@ -1,0 +1,183 @@
+{
+  "generated_at_utc": "2026-01-27T22:10:46Z",
+  "run_dir": "/gpfs/scratch/rsk8552/GPT2-Optimization/benchmarks/bigpurple_v100_2026-01-26/8gpu_2node",
+  "slurm_job_id": "17767552",
+  "hosts": [
+    "gn-0011",
+    "gn-0014"
+  ],
+  "world_size": 8,
+  "gpu": "Tesla V100-SXM2-16GB",
+  "cuda": "12.8",
+  "torch": "2.9.1+cu128",
+  "deepspeed": "0.18.3",
+  "seq_length": 512,
+  "micro_batch_size_per_gpu": 2,
+  "grad_accum_steps": 1,
+  "tokens_per_sec": 19028.55621269582,
+  "total_wall_time_sec": 1539.2320883274078,
+  "nsys_report": "nsys_17767552_gn-0011.nsys-rep",
+  "inputs": [
+    "nsys_stats_gn-0011.txt"
+  ],
+  "nvtx_top5": [
+    {
+      "kind": "nvtx",
+      "name": ":DeepSpeedEngine.backward",
+      "time_percent": 53.9,
+      "total_time": "2765967562725 ns",
+      "raw": "     53.9  27,65,96,75,62,725     14,244  19,41,84,748.9  12,36,84,299.5  11,37,90,285  1,93,66,43,699  11,76,77,819.7  PushPop  :DeepSpeedEngine.backward           "
+    },
+    {
+      "kind": "nvtx",
+      "name": ":DeepSpeedEngine.allreduce_gradients",
+      "time_percent": 40.8,
+      "total_time": "2093359690089 ns",
+      "raw": "     40.8  20,93,35,96,90,089     14,244  14,69,64,314.1   7,52,43,705.0   6,79,65,697  1,84,03,11,805  11,73,92,154.2  PushPop  :DeepSpeedEngine.allreduce_gradients"
+    },
+    {
+      "kind": "nvtx",
+      "name": ":DeepSpeedEngine.forward",
+      "time_percent": 5.0,
+      "total_time": "254776282703 ns",
+      "raw": "      5.0   2,54,77,62,82,703     15,680   1,62,48,487.4   1,60,73,002.0   1,17,93,819    44,36,33,265     70,11,120.0  PushPop  :DeepSpeedEngine.forward            "
+    },
+    {
+      "kind": "nvtx",
+      "name": "NCCL:ncclAllReduce",
+      "time_percent": 0.2,
+      "total_time": "9145940528 ns",
+      "raw": "      0.2      9,14,59,40,528     42,748      2,13,950.1        81,454.0        63,828  1,09,00,22,251   1,10,82,511.9  PushPop  NCCL:ncclAllReduce                  "
+    },
+    {
+      "kind": "nvtx",
+      "name": "NCCL:ncclCommInitRankConfig",
+      "time_percent": 0.1,
+      "total_time": "2707078910 ns",
+      "raw": "      0.1      2,70,70,78,910          8  33,83,84,863.8  34,35,50,328.5  29,43,46,236    36,62,51,944   3,02,59,337.5  PushPop  NCCL:ncclCommInitRankConfig         "
+    }
+  ],
+  "osrt_top5": [
+    {
+      "kind": "osrt",
+      "name": "poll",
+      "time_percent": 21.9,
+      "total_time": "56265058729882 ns",
+      "raw": "     21.9  5,62,65,05,87,29,882     3,46,812     16,22,35,040.1           2,857.0        1,493      5,00,50,61,007       29,81,22,921.2  poll                  "
+    },
+    {
+      "kind": "osrt",
+      "name": "pthread_cond_wait",
+      "time_percent": 21.0,
+      "total_time": "53864747342078 ns",
+      "raw": "     21.0  5,38,64,74,73,42,078     2,77,538     19,40,80,620.8     2,35,96,440.5       89,826  15,39,92,94,62,355    13,37,35,03,709.2  pthread_cond_wait     "
+    },
+    {
+      "kind": "osrt",
+      "name": "sem_wait",
+      "time_percent": 12.7,
+      "total_time": "32605852274722 ns",
+      "raw": "     12.7  3,26,05,85,22,74,722       29,120   1,11,97,06,465.5    42,93,84,732.0        8,975  16,49,79,86,49,855     9,93,79,15,205.9  sem_wait              "
+    },
+    {
+      "kind": "osrt",
+      "name": "fgets",
+      "time_percent": 12.5,
+      "total_time": "32086149375223 ns",
+      "raw": "     12.5  3,20,86,14,93,75,223          671  47,81,84,04,434.0          23,014.0        1,261  16,04,66,41,80,234  2,73,01,91,23,750.4  fgets                 "
+    },
+    {
+      "kind": "osrt",
+      "name": "pthread_cond_timedwait",
+      "time_percent": 10.6,
+      "total_time": "27164030200377 ns",
+      "raw": "     10.6  2,71,64,03,02,00,377    21,17,719      1,28,27,022.9          51,736.0        1,650   4,80,00,03,31,254     1,14,41,24,689.8  pthread_cond_timedwait"
+    }
+  ],
+  "likely_bottleneck": {
+    "allreduce_gradients_over_20pct": true,
+    "matched": {
+      "name": ":DeepSpeedEngine.allreduce_gradients",
+      "time_percent": 40.8,
+      "total_time": "2093359690089 ns"
+    }
+  },
+  "per_file": {
+    "nsys_stats_gn-0011.txt": {
+      "nvtx_top5": [
+        {
+          "kind": "nvtx",
+          "name": ":DeepSpeedEngine.backward",
+          "time_percent": 53.9,
+          "total_time": "2765967562725 ns",
+          "raw": "     53.9  27,65,96,75,62,725     14,244  19,41,84,748.9  12,36,84,299.5  11,37,90,285  1,93,66,43,699  11,76,77,819.7  PushPop  :DeepSpeedEngine.backward           "
+        },
+        {
+          "kind": "nvtx",
+          "name": ":DeepSpeedEngine.allreduce_gradients",
+          "time_percent": 40.8,
+          "total_time": "2093359690089 ns",
+          "raw": "     40.8  20,93,35,96,90,089     14,244  14,69,64,314.1   7,52,43,705.0   6,79,65,697  1,84,03,11,805  11,73,92,154.2  PushPop  :DeepSpeedEngine.allreduce_gradients"
+        },
+        {
+          "kind": "nvtx",
+          "name": ":DeepSpeedEngine.forward",
+          "time_percent": 5.0,
+          "total_time": "254776282703 ns",
+          "raw": "      5.0   2,54,77,62,82,703     15,680   1,62,48,487.4   1,60,73,002.0   1,17,93,819    44,36,33,265     70,11,120.0  PushPop  :DeepSpeedEngine.forward            "
+        },
+        {
+          "kind": "nvtx",
+          "name": "NCCL:ncclAllReduce",
+          "time_percent": 0.2,
+          "total_time": "9145940528 ns",
+          "raw": "      0.2      9,14,59,40,528     42,748      2,13,950.1        81,454.0        63,828  1,09,00,22,251   1,10,82,511.9  PushPop  NCCL:ncclAllReduce                  "
+        },
+        {
+          "kind": "nvtx",
+          "name": "NCCL:ncclCommInitRankConfig",
+          "time_percent": 0.1,
+          "total_time": "2707078910 ns",
+          "raw": "      0.1      2,70,70,78,910          8  33,83,84,863.8  34,35,50,328.5  29,43,46,236    36,62,51,944   3,02,59,337.5  PushPop  NCCL:ncclCommInitRankConfig         "
+        }
+      ],
+      "osrt_top5": [
+        {
+          "kind": "osrt",
+          "name": "poll",
+          "time_percent": 21.9,
+          "total_time": "56265058729882 ns",
+          "raw": "     21.9  5,62,65,05,87,29,882     3,46,812     16,22,35,040.1           2,857.0        1,493      5,00,50,61,007       29,81,22,921.2  poll                  "
+        },
+        {
+          "kind": "osrt",
+          "name": "pthread_cond_wait",
+          "time_percent": 21.0,
+          "total_time": "53864747342078 ns",
+          "raw": "     21.0  5,38,64,74,73,42,078     2,77,538     19,40,80,620.8     2,35,96,440.5       89,826  15,39,92,94,62,355    13,37,35,03,709.2  pthread_cond_wait     "
+        },
+        {
+          "kind": "osrt",
+          "name": "sem_wait",
+          "time_percent": 12.7,
+          "total_time": "32605852274722 ns",
+          "raw": "     12.7  3,26,05,85,22,74,722       29,120   1,11,97,06,465.5    42,93,84,732.0        8,975  16,49,79,86,49,855     9,93,79,15,205.9  sem_wait              "
+        },
+        {
+          "kind": "osrt",
+          "name": "fgets",
+          "time_percent": 12.5,
+          "total_time": "32086149375223 ns",
+          "raw": "     12.5  3,20,86,14,93,75,223          671  47,81,84,04,434.0          23,014.0        1,261  16,04,66,41,80,234  2,73,01,91,23,750.4  fgets                 "
+        },
+        {
+          "kind": "osrt",
+          "name": "pthread_cond_timedwait",
+          "time_percent": 10.6,
+          "total_time": "27164030200377 ns",
+          "raw": "     10.6  2,71,64,03,02,00,377    21,17,719      1,28,27,022.9          51,736.0        1,650   4,80,00,03,31,254     1,14,41,24,689.8  pthread_cond_timedwait"
+        }
+      ]
+    }
+  }
+}

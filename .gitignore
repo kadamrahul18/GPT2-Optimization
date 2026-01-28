@@ -82,3 +82,9 @@ Thumbs.db
 # Documentation
 AGENTS.md
 repo_llm_input.txt
+benchmarks/**/epoch-*
+benchmarks/**/profiles/*.sqlite
+benchmarks/**/profiles/*.nsys-rep
+benchmarks/**/profiles/*.qdstrm
+benchmarks/**/torchrun_logs/**
+benchmarks/**/nccl_rank_*.log
