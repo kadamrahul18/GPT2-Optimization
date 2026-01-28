@@ -79,7 +79,7 @@ Optional profiling artifacts (enable with `NSYS=1`):
 Curated artifacts used for the README are also checked in under:
 - `artifacts/feature4_bigpurple_v100_2026-01-28/`
 
-Example run directories created on Big Purple (scratch, not tracked in git) include:
+Example run directories created on Big Purple include:
 - `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_no_nsys_300`
 - `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_300`
 - `benchmarks/bigpurple_v100_2026-01-27/8gpu_2node_accum2_bucket200_300`
@@ -201,7 +201,7 @@ sed -n '/OS Runtime Summary/,/CUDA API Summary/p' "$RUN_DIR"/profiles/nsys_stats
 - **Slurm specifics**: always set `RUN_DIR` to a writable scratch path.
 - **NCCL logs are expensive**: `NCCL_LOGS=1` produces large per-rank logs and can slow runs.
 
-## Checklist: What to Commit (Git Hygiene)
+## Git Commit Checklist:
 
 Recommended to commit (small, reviewer-friendly):
 - `README.md`, `src/`, `scripts/`, `tests/`
