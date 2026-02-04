@@ -131,6 +131,19 @@ Compare:
 - `RUN_DIR/training_metrics.json` → `epochs[0].tokens_per_sec_global`, `epochs[0].step_time_p95_sec`
 - `RUN_DIR/training_metrics.json` → `summary.total_wall_time_sec`
 
+### Proof / Artifacts
+The numbers and attributions cited below are backed by the checked-in artifacts under:
+- `artifacts/feature4_bigpurple_v100_2026-01-28/`
+
+Headline A/B throughput table (NSYS=0, 300-step harness):
+- Baseline metrics: `artifacts/feature4_bigpurple_v100_2026-01-28/accum2_300/training_metrics.json`
+- Tuned metrics: `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_300/training_metrics.json`
+
+Profiling attribution (NSYS=1, used for bottleneck evidence only):
+- Baseline `nsys stats`: `artifacts/feature4_bigpurple_v100_2026-01-28/baseline_2026-01-26/nsys_stats_gn-0011.txt`
+- Tuned `nsys stats`: `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_nsys80/nsys_stats_gn-0013.txt`
+- Parsed top-5 summary: `artifacts/feature4_bigpurple_v100_2026-01-28/bucket200_nsys80/profile_summary.json`
+
 ### Results (curated in-repo artifacts)
 The exact files backing the table below are checked in under `artifacts/feature4_bigpurple_v100_2026-01-28/`.
 
