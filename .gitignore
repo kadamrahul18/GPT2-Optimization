@@ -82,6 +82,7 @@ Thumbs.db
 # Documentation
 AGENTS.md
 repo_llm_input.txt
+drills/
 benchmarks/**/epoch-*
 benchmarks/**/profiles/*.sqlite
 benchmarks/**/profiles/*.nsys-rep

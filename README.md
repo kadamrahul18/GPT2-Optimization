@@ -8,6 +8,40 @@ This repo demonstrates **end-to-end multi-node GPT-2 training on Slurm (2 nodes 
 - **Profiling pipeline**: optional Nsight Systems capture + `nsys stats` extraction + a readable `profiles/profile_summary.json`.
 - **Performance optimization (Feature 4)**: DeepSpeed ZeRO‑1 communication tuning (bucket sizes) validated with an A/B experiment showing a **~+19.5% throughput improvement** at constant batch/sequence/steps.
 
+## High-Level Architecture
+
+```mermaid
+flowchart TD
+    A[Slurm launcher<br/>scripts/slurm/run_2node_8gpu.sbatch] --> B[srun / torchrun<br/>rank and rendezvous setup]
+    B --> C[Distributed training workers<br/>src/gpt2.py]
+
+    C --> D[Dataset + train/val loop]
+    C --> E[DeepSpeed + torch.distributed]
+    E --> F[NCCL / CUDA / 2 nodes x 8 V100]
+
+    A --> G[Optional debug / profiling toggles<br/>NSYS, NCCL_LOGS, DIST_DEBUG]
+    G --> B
+
+    C --> H[training_metrics.json]
+    C --> I[launcher_metadata.json]
+    C --> J[RUN_COMPLETE.txt]
+    B --> K[profiles/nsys_*.nsys-rep]
+    B --> L[nccl_rank_*.log / nccl_topo.xml / ibstat.txt / topo.txt]
+
+    K --> M[nsys stats text export]
+    M --> N[scripts/profiling/parse_nsys_stats.py]
+    N --> O[profiles/profile_summary.json]
+
+    H --> P[scripts/generate_scaling_table.py]
+    H --> Q[scripts/run_scaling_benchmarks.py]
+    H --> R[scripts/verify_run_artifacts.py]
+```
+
+The key idea is that the project is not just a GPT-2 trainer. It is a harnessed distributed-training system with three layers:
+- **Orchestration**: Slurm + `srun` + `torchrun` launch the multi-node job and enable profiling/debug modes.
+- **Runtime**: `src/gpt2.py` drives the train loop while DeepSpeed, `torch.distributed`, NCCL, and CUDA handle distributed execution.
+- **Observability and analysis**: each run emits structured artifacts, and the Python tooling turns raw profiler output into summaries that are easier to compare.
+
 ## Environment (Big Purple)
 
 Stable context from recorded metrics:
